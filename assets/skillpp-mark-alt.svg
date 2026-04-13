@@ -5,8 +5,8 @@
   role="img"
   aria-labelledby="title desc"
 >
-  <title id="title">Skill Install ++</title>
-  <desc id="desc">Premium Skill Install ++ wordmark.</desc>
+  <title id="title">Skill Install ++ dark</title>
+  <desc id="desc">Dark premium Skill Install ++ wordmark.</desc>
 
   <rect
     x="24"
@@ -14,15 +14,15 @@
     width="932"
     height="192"
     rx="30"
-    fill="#F7F4EE"
-    stroke="#E3DBCF"
+    fill="#181A20"
+    stroke="#2A2F39"
     stroke-width="2"
   />
 
   <text
     x="88"
     y="84"
-    fill="#6E6A64"
+    fill="#A9A297"
     font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif"
     font-size="22"
     font-weight="560"
@@ -34,7 +34,7 @@
   <text
     x="84"
     y="162"
-    fill="#17181C"
+    fill="#F4F0EA"
     font-family="'Baskerville Old Face', 'Palatino Linotype', 'Book Antiqua', Georgia, serif"
     font-size="86"
     font-weight="700"
@@ -46,7 +46,7 @@
   </text>
 
   <g
-    stroke="#1F2937"
+    stroke="#9BA7B8"
     stroke-width="12"
     stroke-linecap="round"
   >

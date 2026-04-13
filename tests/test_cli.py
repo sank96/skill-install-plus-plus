@@ -58,12 +58,15 @@ class PublicSurfaceTests(unittest.TestCase):
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertTrue((PROJECT_ROOT / "assets" / "skillpp-mark.svg").is_file())
+        self.assertTrue((PROJECT_ROOT / "assets" / "skillpp-mark-alt.svg").is_file())
         self.assertIn("img.shields.io", readme)
         self.assertIn("skillpp-mark.svg", readme)
         self.assertIn("## Table of Contents", readme)
+        self.assertIn("## What Skillpp Manages", readme)
         self.assertIn("## Highlights", readme)
         self.assertIn("## Support Matrix", readme)
         self.assertIn("## Why Audit-First Matters", readme)
+        self.assertIn("skillpp bootstrap --source .", readme)
 
 
 class RegistryTests(unittest.TestCase):

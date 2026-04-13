@@ -1,20 +1,18 @@
 <p align="center">
   <img
     src="https://raw.githubusercontent.com/sank96/skill-install-plus-plus/main/assets/skillpp-mark.svg"
-    alt="skillpp mark"
-    width="120"
-    height="120"
+    alt="Skill Install ++ wordmark"
+    width="560"
+    height="137"
   >
 </p>
-
-<h1 align="center">skillpp</h1>
 
 <p align="center">
   <strong>Audit-first skill and plugin management for Codex, Claude Code, and Copilot CLI.</strong>
 </p>
 
 <p align="center">
-  Normalize standalone skills, hybrid repositories, and plugin bundles under one source-of-truth tree without guessing hidden client state.
+  Keep <code>~/.skills</code> as the source of truth, export only the discovery surfaces each client should see, and repair drift without guessing hidden client state.
 </p>
 
 <p align="center">
@@ -36,12 +34,13 @@
 </p>
 
 <p align="center">
-  Repository: <code>skill-install-plus-plus</code> · Package: <code>skillpp</code> · CLI: <code>skillpp</code>
+  Repository: <code>skill-install-plus-plus</code> | Package: <code>skillpp</code> | CLI: <code>skillpp</code>
 </p>
 
 ## Table of Contents
 
 - [Why This Exists](#why-this-exists)
+- [What Skillpp Manages](#what-skillpp-manages)
 - [Highlights](#highlights)
 - [Support Matrix](#support-matrix)
 - [Install](#install)
@@ -56,24 +55,35 @@
 
 ## Why This Exists
 
-AI assistant skills get messy fast once you combine:
+AI assistant skill setups drift quickly once you mix:
 
-- standalone local skills
+- standalone local skill folders
 - Git-backed skill repositories
-- hybrid repositories that export skills and bundle metadata
-- plugin bundles with manifests, agents, hooks, and runtime code
+- hybrid repositories that export skills plus bundle metadata
+- plugin bundles with manifests, agents, hooks, and runtime files
 
-`skillpp` gives those objects one managed home under `~/.skills`, then exposes
-only the explicit, safe skill surfaces into client discovery directories.
+Copies go stale, links diverge, and it becomes unclear which files are managed
+versus accidental.
+
+`skillpp` gives those assets one managed home under `~/.skills`, then projects
+only the explicit `SKILL.md` surfaces into client discovery roots.
 
 It is intentionally conservative: audit first, mutate second.
+
+## What Skillpp Manages
+
+- Standalone local skills normalized into `~/.skills/custom`
+- Git-backed skill repositories stored under `~/.skills/repos/<owner>/<repo>`
+- Plugin bundles stored under `~/.skills/plugins/<publisher>/<name>`
+- Explicit skill exposures for Codex, Claude Code, and Copilot CLI
+- Non-destructive alignment when client discovery roots drift away from managed state
 
 ## Highlights
 
 - One managed source-of-truth tree under `~/.skills`
 - Supports standalone skills, Git-backed repos, hybrid repos, and plugin bundles
 - Audit-first workflow for drift, broken links, legacy copies, and missing exposures
-- Non-destructive alignment for safe client-side repairs
+- Safe alignment that creates missing links without rewriting unrelated client state
 - Public Python CLI available through `uvx`, `uv tool install`, and `pipx`
 - GitHub Actions CI plus PyPI release automation via Trusted Publishing
 
@@ -107,37 +117,37 @@ pipx install skillpp
 
 ## Quick Start
 
-Audit the current managed state:
+1. Audit the current managed state:
 
 ```powershell
 skillpp audit
 ```
 
-Bootstrap the current project into the local managed skill tree:
+2. Bootstrap the current project into the managed tree:
 
 ```powershell
 skillpp bootstrap --source .
 ```
 
-Install a skill from GitHub:
+3. Install a skill from GitHub:
 
 ```powershell
 skillpp install --repo jackwener/OpenCLI --path skills/opencli-browser
 ```
 
-Install a plugin bundle:
+4. Install a plugin bundle:
 
 ```powershell
 skillpp install-plugin --publisher acme --name suite --repo acme/suite
 ```
 
-Create missing non-destructive exposures:
+5. Create missing non-destructive exposures:
 
 ```powershell
 skillpp align --apply
 ```
 
-Refresh managed repositories and git-backed bundles:
+6. Refresh managed repositories and git-backed bundles:
 
 ```powershell
 skillpp update
@@ -149,10 +159,10 @@ Everything managed by `skillpp` lives under `~/.skills`:
 
 ```text
 ~/.skills/
-├── custom/
-├── repos/<owner>/<repo>/
-├── plugins/<publisher>/<name>/
-└── registry.json
+|- custom/
+|- repos/<owner>/<repo>/
+|- plugins/<publisher>/<name>/
+`- registry.json
 ```
 
 Client discovery roots stay separate:
@@ -166,13 +176,13 @@ model.
 
 ## Why Audit-First Matters
 
-Blind installers are fast until they overwrite something you needed.
+Blind installers are convenient until they overwrite something you needed.
 
 `skillpp` treats that as a design problem, not a user problem. The tool:
 
 - inventories managed sources before mutating discovery roots
 - surfaces legacy copies and mismatched links explicitly
-- creates only safe missing links automatically
+- creates only safe missing links during alignment
 - avoids guessing undocumented client plugin registries
 
 That boundary matters most for larger bundles where exported `SKILL.md` files
@@ -212,7 +222,8 @@ There is no npm package or `npx` wrapper in `v1`.
 
 ## Contributing
 
-Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) for
+development workflow, test expectations, and contribution scope.
 
 ## Security
 
