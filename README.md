@@ -1,31 +1,91 @@
-# skill-install-plus-plus
+<p align="center">
+  <img
+    src="https://raw.githubusercontent.com/sank96/skill-install-plus-plus/main/assets/skillpp-mark.svg"
+    alt="skillpp mark"
+    width="120"
+    height="120"
+  >
+</p>
 
-`skillpp` is an audit-first skill and plugin manager for Codex, Claude Code,
-and Copilot CLI.
+<h1 align="center">skillpp</h1>
 
-It keeps `~/.skills` as the source of truth, inventories drift before making
-changes, and helps normalize skills, hybrid repositories, and plugin bundles
-into a predictable local layout.
+<p align="center">
+  <strong>Audit-first skill and plugin management for Codex, Claude Code, and Copilot CLI.</strong>
+</p>
 
-## Why this exists
+<p align="center">
+  Normalize standalone skills, hybrid repositories, and plugin bundles under one source-of-truth tree without guessing hidden client state.
+</p>
 
-Managing AI assistant skills becomes messy quickly once you mix:
+<p align="center">
+  <a href="https://github.com/sank96/skill-install-plus-plus/actions/workflows/ci.yml">
+    <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/sank96/skill-install-plus-plus/ci.yml?branch=main&label=CI">
+  </a>
+  <a href="https://github.com/sank96/skill-install-plus-plus/releases">
+    <img alt="Release" src="https://img.shields.io/github/v/release/sank96/skill-install-plus-plus?label=release">
+  </a>
+  <a href="https://pypi.org/project/skillpp/">
+    <img alt="PyPI" src="https://img.shields.io/pypi/v/skillpp">
+  </a>
+  <a href="https://pypi.org/project/skillpp/">
+    <img alt="Python" src="https://img.shields.io/pypi/pyversions/skillpp">
+  </a>
+  <a href="LICENSE">
+    <img alt="License" src="https://img.shields.io/github/license/sank96/skill-install-plus-plus">
+  </a>
+</p>
 
-- standalone skills
+<p align="center">
+  Repository: <code>skill-install-plus-plus</code> · Package: <code>skillpp</code> · CLI: <code>skillpp</code>
+</p>
+
+## Table of Contents
+
+- [Why This Exists](#why-this-exists)
+- [Highlights](#highlights)
+- [Support Matrix](#support-matrix)
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [Source-of-Truth Model](#source-of-truth-model)
+- [Why Audit-First Matters](#why-audit-first-matters)
+- [Development](#development)
+- [Release Model](#release-model)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
+
+## Why This Exists
+
+AI assistant skills get messy fast once you combine:
+
+- standalone local skills
 - Git-backed skill repositories
 - hybrid repositories that export skills and bundle metadata
-- plugin bundles with agents, hooks, manifests, and runtime code
+- plugin bundles with manifests, agents, hooks, and runtime code
 
-`skillpp` gives those objects one managed home and exposes only the safe,
-explicit skill surfaces into client discovery directories.
+`skillpp` gives those objects one managed home under `~/.skills`, then exposes
+only the explicit, safe skill surfaces into client discovery directories.
 
-## Supported clients
+It is intentionally conservative: audit first, mutate second.
 
-- Codex
-- Claude Code
-- Copilot CLI
+## Highlights
 
-## Installation
+- One managed source-of-truth tree under `~/.skills`
+- Supports standalone skills, Git-backed repos, hybrid repos, and plugin bundles
+- Audit-first workflow for drift, broken links, legacy copies, and missing exposures
+- Non-destructive alignment for safe client-side repairs
+- Public Python CLI available through `uvx`, `uv tool install`, and `pipx`
+- GitHub Actions CI plus PyPI release automation via Trusted Publishing
+
+## Support Matrix
+
+| Client | Status | Discovery root | Notes |
+| --- | --- | --- | --- |
+| Codex | Supported | `~/.agents/skills` | Respects existing aggregate custom exposures where already in place |
+| Claude Code | Supported | `~/.claude/skills` | Injects explicit skill surfaces only |
+| Copilot CLI | Supported | `~/.copilot/skills` | Injects explicit skill surfaces only |
+
+## Install
 
 ### Try it without installing
 
@@ -45,7 +105,7 @@ uv tool install skillpp
 pipx install skillpp
 ```
 
-## Quick start
+## Quick Start
 
 Audit the current managed state:
 
@@ -53,19 +113,19 @@ Audit the current managed state:
 skillpp audit
 ```
 
-Bootstrap the current project into your local managed skill tree:
+Bootstrap the current project into the local managed skill tree:
 
 ```powershell
 skillpp bootstrap --source .
 ```
 
-Install a skill from a GitHub repository:
+Install a skill from GitHub:
 
 ```powershell
 skillpp install --repo jackwener/OpenCLI --path skills/opencli-browser
 ```
 
-Install a plugin bundle from GitHub:
+Install a plugin bundle:
 
 ```powershell
 skillpp install-plugin --publisher acme --name suite --repo acme/suite
@@ -83,18 +143,17 @@ Refresh managed repositories and git-backed bundles:
 skillpp update
 ```
 
-## Source-of-truth layout
+## Source-of-Truth Model
 
 Everything managed by `skillpp` lives under `~/.skills`:
 
-- `~/.skills/custom`
-  Local standalone skills.
-- `~/.skills/repos/<owner>/<repo>`
-  Git-backed skill repositories.
-- `~/.skills/plugins/<publisher>/<name>`
-  Managed plugin bundles.
-- `~/.skills/registry.json`
-  Registry for repo installs and plugin bundle installs.
+```text
+~/.skills/
+├── custom/
+├── repos/<owner>/<repo>/
+├── plugins/<publisher>/<name>/
+└── registry.json
+```
 
 Client discovery roots stay separate:
 
@@ -102,32 +161,22 @@ Client discovery roots stay separate:
 - Claude Code: `~/.claude/skills`
 - Copilot CLI: `~/.copilot/skills`
 
-## Mental model
+This keeps the managed tree explicit while preserving each client's discovery
+model.
 
-Use `custom` for small standalone skills.
+## Why Audit-First Matters
 
-Use `repos` for repositories that primarily publish skills, even if they also
-carry plugin metadata.
+Blind installers are fast until they overwrite something you needed.
 
-Use `plugins` for bundle-style installs that may include:
+`skillpp` treats that as a design problem, not a user problem. The tool:
 
-- exported skills under `skills/*`
-- plugin manifests such as `.claude-plugin/plugin.json`
-- agents
-- hooks
-- runtime code
+- inventories managed sources before mutating discovery roots
+- surfaces legacy copies and mismatched links explicitly
+- creates only safe missing links automatically
+- avoids guessing undocumented client plugin registries
 
-## Current behavior
-
-`skillpp` is intentionally conservative:
-
-- it audits before changing discovery roots
-- it auto-creates missing safe links
-- it surfaces legacy copies and mismatched links
-- it does not guess undocumented client plugin registries
-
-That boundary matters for larger bundles where exported `SKILL.md` files are
-only one part of the system.
+That boundary matters most for larger bundles where exported `SKILL.md` files
+are only one part of the package surface.
 
 ## Development
 
@@ -149,32 +198,25 @@ Check built artifacts:
 uv run --with twine python -m twine check dist/*
 ```
 
-## Release
+## Release Model
 
-The public package name is `skillpp`, while the repository remains
-`skill-install-plus-plus`.
+`skillpp` is PyPI-first.
 
-The first public release flow is:
+Recommended usage modes:
 
-1. push the repository to GitHub
-2. configure PyPI Trusted Publishing
-3. create tag `v0.1.0`
-4. publish
+- `uvx skillpp ...` for ephemeral runs
+- `uv tool install skillpp` for persistent installs
+- `pipx install skillpp` as a familiar Python CLI alternative
 
-## Limitations
-
-- the tool is currently Windows-first because it manages junction-based client
-  exposures there
-- bundle-level plugin runtime behavior is intentionally not auto-mutated
-- no npm package or `npx` wrapper is shipped in v1
+There is no npm package or `npx` wrapper in `v1`.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Security
 
-See [SECURITY.md](SECURITY.md).
+Security reporting guidance lives in [SECURITY.md](SECURITY.md).
 
 ## License
 

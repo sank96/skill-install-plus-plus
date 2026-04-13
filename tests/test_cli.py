@@ -54,6 +54,17 @@ class PublicSurfaceTests(unittest.TestCase):
         self.assertIn("uv tool install skillpp", readme)
         self.assertIn("pipx install skillpp", readme)
 
+    def test_readme_has_badges_logo_and_polished_sections(self) -> None:
+        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertTrue((PROJECT_ROOT / "assets" / "skillpp-mark.svg").is_file())
+        self.assertIn("img.shields.io", readme)
+        self.assertIn("skillpp-mark.svg", readme)
+        self.assertIn("## Table of Contents", readme)
+        self.assertIn("## Highlights", readme)
+        self.assertIn("## Support Matrix", readme)
+        self.assertIn("## Why Audit-First Matters", readme)
+
 
 class RegistryTests(unittest.TestCase):
     def test_registry_round_trip_preserves_repo_entries(self) -> None:

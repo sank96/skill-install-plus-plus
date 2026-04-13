@@ -1,0 +1,30 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 128 128"
+  fill="none"
+  role="img"
+  aria-labelledby="title desc"
+>
+  <title id="title">skillpp mark</title>
+  <desc id="desc">Minimal skillpp brand mark with a geometric curve and two plus symbols.</desc>
+
+  <path
+    d="M84 28v16M76 36h16"
+    stroke="#14B8A6"
+    stroke-linecap="round"
+    stroke-width="8"
+  />
+  <path
+    d="M102 28v16M94 36h16"
+    stroke="#14B8A6"
+    stroke-linecap="round"
+    stroke-width="8"
+  />
+  <path
+    d="M82 34H54C42.954 34 34 42.954 34 54C34 65.046 42.954 74 54 74H74C85.046 74 94 82.954 94 94C94 105.046 85.046 114 74 114H46"
+    stroke="#94A3B8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-width="10"
+  />
+</svg>
