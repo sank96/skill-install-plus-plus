@@ -356,5 +356,29 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(codex_policy.count("skill-install-plus-plus"), 1)
 
 
+class RepoInstallTests(unittest.TestCase):
+    def test_install_repo_skills_uses_safe_exposure_name_for_windows_unsafe_skill_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            roots = WorkspaceRoots.for_home(home)
+            repo_root = home / ".skills" / "repos" / "nextlevelbuilder" / "ui-ux-pro-max-skill"
+            skill_dir = repo_root / ".claude" / "skills" / "banner-design"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: ckm:banner-design\n---\n",
+                encoding="utf-8",
+            )
+
+            result = roots.install_repo_skills(
+                repo_slug="nextlevelbuilder/ui-ux-pro-max-skill",
+                skill_paths=[".claude/skills/banner-design"],
+            )
+
+            self.assertEqual(result.installed[0].name, "ckm:banner-design")
+            self.assertTrue((home / ".agents" / "skills" / "banner-design" / "SKILL.md").is_file())
+            self.assertTrue((home / ".claude" / "skills" / "banner-design" / "SKILL.md").is_file())
+            self.assertTrue((home / ".copilot" / "skills" / "banner-design" / "SKILL.md").is_file())
+
+
 if __name__ == "__main__":
     unittest.main()

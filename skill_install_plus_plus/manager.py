@@ -11,6 +11,15 @@ from typing import Iterable
 
 CLIENT_NAMES = ("codex", "claude", "copilot")
 POLICY_MARKER = "<!-- skill-management-policy -->"
+WINDOWS_INVALID_PATH_CHARS = set('<>:"/\\|?*')
+WINDOWS_RESERVED_PATH_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
 
 
 @dataclass(frozen=True)
@@ -207,6 +216,20 @@ def _path_exists_or_links(path: Path) -> bool:
     return os.path.lexists(path)
 
 
+def _is_windows_safe_dir_name(name: str) -> bool:
+    if not name or any(char in WINDOWS_INVALID_PATH_CHARS for char in name):
+        return False
+    if name[-1] in {" ", "."}:
+        return False
+    return name.split(".")[0].upper() not in WINDOWS_RESERVED_PATH_NAMES
+
+
+def _exposure_dir_name(skill_name: str, source_path: Path) -> str:
+    if os.name == "nt" and not _is_windows_safe_dir_name(skill_name):
+        return source_path.name
+    return skill_name
+
+
 def _ensure_directory_link(link_path: Path, target_path: Path) -> tuple[bool, str]:
     if link_path == target_path:
         link_path.mkdir(parents=True, exist_ok=True)
@@ -384,7 +407,7 @@ class WorkspaceRoots:
         self.ensure_root_directories()
         client_list = self._normalize_clients(clients)
         skill_name = _read_skill_name(source_root)
-        managed_source = self.custom_root / skill_name
+        managed_source = self.custom_root / _exposure_dir_name(skill_name, source_root)
 
         created_paths: list[Path] = []
         skipped_paths: list[str] = []
@@ -644,7 +667,7 @@ class WorkspaceRoots:
                     code="missing_exposure",
                     message=f"Managed skill is not exposed in {client}.",
                     target=source.path,
-                    proposed_action=f"Create link at {self.client_roots()[client] / source.name}.",
+                    proposed_action=f"Create link at {self._client_exposure_path(client, source.name, source.path)}.",
                 )
             )
 
@@ -677,7 +700,7 @@ class WorkspaceRoots:
                         code="missing_plugin_injection",
                         message=f"Plugin-exported skill is not injected in {client}.",
                         target=skill_dir,
-                        proposed_action=f"Create link at {self.client_roots()[client] / skill_name}.",
+                        proposed_action=f"Create link at {self._client_exposure_path(client, skill_name, skill_dir)}.",
                     )
                 )
         return issues
@@ -979,9 +1002,8 @@ class WorkspaceRoots:
         created: list[Path] = []
         skipped: list[Path] = []
         for client in client_list:
-            client_root = self.client_roots()[client]
             for skill_name, skill_dir in bundle.exported_skill_dirs.items():
-                destination = client_root / skill_name
+                destination = self._client_exposure_path(client, skill_name, skill_dir)
                 created_link, _ = _ensure_directory_link(destination, skill_dir)
                 if created_link:
                     created.append(destination)
@@ -1041,7 +1063,7 @@ class WorkspaceRoots:
                 target = source_map.get(issue.skill_name)
                 if not target or not issue.client:
                     continue
-                path = self.client_roots()[issue.client] / issue.skill_name
+                path = self._client_exposure_path(issue.client, issue.skill_name, target)
                 created, message = _ensure_directory_link(path, target)
                 action = f"{'Created' if created else 'Skipped'} skill link for {issue.skill_name} in {issue.client}: {path}"
                 if not created and message:
@@ -1051,7 +1073,7 @@ class WorkspaceRoots:
                 target = plugin_skill_map.get(issue.skill_name)
                 if not target or not issue.client:
                     continue
-                path = self.client_roots()[issue.client] / issue.skill_name
+                path = self._client_exposure_path(issue.client, issue.skill_name, target)
                 created, message = _ensure_directory_link(path, target)
                 action = f"{'Created' if created else 'Skipped'} plugin injection for {issue.skill_name} in {issue.client}: {path}"
                 if not created and message:
@@ -1066,9 +1088,12 @@ class WorkspaceRoots:
             aggregate = client_root / "custom"
             if _path_exists_or_links(aggregate) and _safe_resolve(aggregate) == _safe_resolve(self.custom_root):
                 return False, f"Skipped {source.name}: existing Codex custom aggregate already exposes managed custom skills."
-        destination = client_root / source.name
+        destination = self._client_exposure_path(client, source.name, source.path)
         created, _ = _ensure_directory_link(destination, source.path)
         return created, destination
+
+    def _client_exposure_path(self, client: str, skill_name: str, source_path: Path) -> Path:
+        return self.client_roots()[client] / _exposure_dir_name(skill_name, source_path)
 
     def _normalize_clients(self, clients: Iterable[str] | None) -> list[str]:
         if not clients:
