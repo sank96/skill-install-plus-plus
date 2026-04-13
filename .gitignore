@@ -28,8 +28,14 @@ uv.lock
 .vscode/
 *.swp
 *.swo
+.claude/
+.claude-flow/
+.swarm/
 
 # Local planning artifacts
 docs/audits/
 docs/plans/
 docs/specs/
+
+# Local visual review artifacts
+.superpowers/
