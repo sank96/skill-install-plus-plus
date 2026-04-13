@@ -9,10 +9,20 @@ Versioning.
 
 ### Changed
 
-- Upgraded the public README with badges, stronger information hierarchy, and a
-  polished open source presentation
-- Added the minimal `skillpp` brand mark SVG used by the repository README
+## [0.1.1] - 2026-04-13
+
+### Changed
+
+- Refined the public README with a stronger hero, clearer workflow copy, and an
+  ASCII-safe source-of-truth example for GitHub and PyPI rendering
+- Added aligned light and dark `skillpp` wordmark SVG assets with the new
+  two-tone `++` treatment
 - Updated GitHub Actions references to Node 24-compatible action versions
+
+### Fixed
+
+- Normalized client exposure directory names on Windows when a skill name
+  contains characters that are invalid for directory creation
 
 ## [0.1.0] - 2026-04-13
 
