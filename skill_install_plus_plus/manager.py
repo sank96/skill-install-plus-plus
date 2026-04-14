@@ -167,7 +167,7 @@ def _is_junction(path: Path) -> bool:
 
 
 def _is_link(path: Path) -> bool:
-    return path.is_symlink() or _is_junction(path)
+    return path.is_symlink() or _is_junction(path) or (_path_exists_or_links(path) and not path.exists())
 
 
 def _link_type(path: Path) -> str:
@@ -773,6 +773,20 @@ class WorkspaceRoots:
                             )
                         )
                         continue
+                    if top_entry_is_link and not entry.exists():
+                        items.append(
+                            ClientSkill(
+                                client=client,
+                                skill_name=entry.name,
+                                skill_dir=entry,
+                                top_entry=entry,
+                                direct=True,
+                                top_entry_is_link=top_entry_is_link,
+                                top_entry_link_type=top_entry_link_type,
+                                resolved_skill_dir=_safe_resolve(entry),
+                            )
+                        )
+                        continue
                     for skill_md in sorted(entry.rglob("SKILL.md")):
                         skill_dir = skill_md.parent
                         items.append(
@@ -1079,6 +1093,31 @@ class WorkspaceRoots:
                 if not created and message:
                     action = f"{action} ({message})"
                 actions.append(action)
+            elif issue.code == "broken_link":
+                if not issue.path or not issue.target or not issue.client:
+                    continue
+                try:
+                    if _is_link(issue.path):
+                        issue.path.unlink()
+                except OSError as exc:
+                    actions.append(f"Failed to remove broken link {issue.path}: {exc}")
+                    continue
+                try:
+                    created, message = _ensure_directory_link(issue.path, issue.target)
+                except RuntimeError as exc:
+                    actions.append(f"Failed to repair link for {issue.skill_name} in {issue.client}: {exc}")
+                    continue
+                action = f"Repaired broken link for {issue.skill_name} in {issue.client}: {issue.path} -> {issue.target}"
+                if not created and message:
+                    action = f"{action} ({message})"
+                actions.append(action)
+            elif issue.code == "legacy_copy":
+                if not issue.path or not issue.target or not issue.client:
+                    continue
+                actions.append(
+                    f"Manual action required - standalone copy found for {issue.skill_name} in {issue.client}: "
+                    f"delete {issue.path} then re-run align to create the managed link."
+                )
 
         return self.audit(), actions
 

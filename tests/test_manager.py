@@ -232,6 +232,50 @@ class PluginAuditTests(unittest.TestCase):
             self.assertFalse([issue for issue in report.issues if issue.code == "manual_bundle_detected"])
 
 
+class AlignRepairTests(unittest.TestCase):
+    def test_align_apply_repairs_broken_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            skill_dir = home / ".skills" / "custom" / "local-skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: local-skill\n---\n", encoding="utf-8")
+
+            gone = home / "gone"
+            gone.mkdir()
+            claude_entry = home / ".claude" / "skills" / "local-skill"
+            _create_directory_link(claude_entry, gone)
+            gone.rmdir()
+
+            roots = WorkspaceRoots.for_home(home)
+
+            pre = roots.audit()
+            broken = [i for i in pre.issues if i.code == "broken_link" and i.client == "claude"]
+            self.assertTrue(broken, "expected broken_link issue before align")
+
+            report, actions = roots.align(apply=True)
+
+            self.assertFalse([i for i in report.issues if i.code == "broken_link" and i.client == "claude"])
+            self.assertTrue(any("Repaired broken link" in a for a in actions))
+            self.assertTrue((home / ".claude" / "skills" / "local-skill" / "SKILL.md").is_file())
+
+    def test_align_apply_reports_legacy_copy_without_deleting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            skill_dir = home / ".skills" / "custom" / "local-skill"
+            claude_copy = home / ".claude" / "skills" / "local-skill"
+            skill_dir.mkdir(parents=True)
+            claude_copy.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: local-skill\n---\n", encoding="utf-8")
+            (claude_copy / "SKILL.md").write_text("---\nname: local-skill\n---\n", encoding="utf-8")
+
+            roots = WorkspaceRoots.for_home(home)
+
+            report, actions = roots.align(apply=True)
+
+            self.assertTrue(claude_copy.is_dir())
+            self.assertTrue(any("legacy_copy" in a.lower() or "standalone copy" in a.lower() for a in actions))
+
+
 class PluginRegistryTests(unittest.TestCase):
     def test_registry_round_trip_preserves_plugins(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
