@@ -2,15 +2,11 @@ from __future__ import annotations
 
 from io import StringIO
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest import mock
 import sys
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -32,11 +28,12 @@ class PublicSurfaceTests(unittest.TestCase):
         pyproject = PROJECT_ROOT / "pyproject.toml"
         self.assertTrue(pyproject.is_file())
 
-        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-        project = data["project"]
-
-        self.assertEqual(project["name"], "skillpp")
-        self.assertEqual(project["scripts"]["skillpp"], "skill_install_plus_plus.cli:main")
+        pyproject_text = pyproject.read_text(encoding="utf-8")
+        self.assertRegex(pyproject_text, r"(?ms)^\[project\].*?^name = \"skillpp\"$")
+        self.assertRegex(
+            pyproject_text,
+            r"(?ms)^\[project\.scripts\].*?^skillpp = \"skill_install_plus_plus\.cli:main\"$",
+        )
 
     def test_repository_has_open_source_basics(self) -> None:
         expected = [
