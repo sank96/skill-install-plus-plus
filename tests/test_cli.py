@@ -3,10 +3,14 @@ from __future__ import annotations
 from io import StringIO
 from pathlib import Path
 import tempfile
-import tomllib
 import unittest
 from unittest import mock
 import sys
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
