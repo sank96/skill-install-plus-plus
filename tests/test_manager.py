@@ -230,11 +230,11 @@ class PluginAuditTests(unittest.TestCase):
             report = roots.audit()
 
             manual_entries = [
-                (issue.skill_name, issue.code)
+                (issue.skill_name, issue.client, issue.code)
                 for issue in report.issues
                 if issue.code == "manual_bundle_detected"
             ]
-            self.assertIn(("understand-anything-plugin", "manual_bundle_detected"), manual_entries)
+            self.assertIn(("understand-anything-plugin", "codex", "manual_bundle_detected"), manual_entries)
 
     def test_audit_detects_manual_bundle_in_claude_home(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -248,11 +248,34 @@ class PluginAuditTests(unittest.TestCase):
             report = roots.audit()
 
             manual_entries = [
-                (issue.skill_name, issue.code)
+                (issue.skill_name, issue.client, issue.code)
                 for issue in report.issues
                 if issue.code == "manual_bundle_detected"
             ]
-            self.assertIn(("understand-anything-plugin", "manual_bundle_detected"), manual_entries)
+            self.assertIn(("understand-anything-plugin", "claude", "manual_bundle_detected"), manual_entries)
+
+    def test_audit_deduplicates_manual_bundle_when_codex_links_to_agents_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            agents_root = home / ".agents"
+            manual_bundle = agents_root / "understand-anything-plugin"
+            (manual_bundle / ".claude-plugin").mkdir(parents=True)
+            (manual_bundle / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
+            _create_directory_link(home / ".codex", agents_root)
+
+            roots = WorkspaceRoots.for_home(home)
+
+            report = roots.audit()
+
+            manual_entries = [
+                (issue.skill_name, issue.client, issue.code)
+                for issue in report.issues
+                if issue.code == "manual_bundle_detected"
+            ]
+            self.assertEqual(
+                manual_entries,
+                [("understand-anything-plugin", "codex", "manual_bundle_detected")],
+            )
 
     def test_audit_ignores_backup_like_manual_bundle_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
