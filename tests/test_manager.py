@@ -389,7 +389,7 @@ class RepoInstallTests(unittest.TestCase):
 
             def fake_clone(args: list[str], cwd=None) -> str:
                 # Simulate what git clone would do: create the directory with a skill.
-                skill_dir = repo_root / "skills" / "my-skill"
+                skill_dir = Path(args[-1]) / "skills" / "my-skill"
                 skill_dir.mkdir(parents=True)
                 (skill_dir / "SKILL.md").write_text("---\nname: my-skill\n---\n", encoding="utf-8")
                 return ""
@@ -406,7 +406,10 @@ class RepoInstallTests(unittest.TestCase):
             # which is the full list: ["git", "clone", "--depth", "1", "--branch", "main", <url>, <dest>]
             self.assertEqual(clone_args[0], "git")
             self.assertEqual(clone_args[1], "clone")
+            self.assertIn("--branch", clone_args)
+            self.assertEqual(clone_args[clone_args.index("--branch") + 1], "main")
             self.assertIn("acme/toolbox", clone_args[-2])  # URL is second-to-last arg
+            self.assertEqual(clone_args[-1], str(repo_root))
 
             self.assertEqual(len(result.installed), 1)
             self.assertEqual(result.installed[0].name, "my-skill")
@@ -430,9 +433,7 @@ class RepoInstallTests(unittest.TestCase):
                     update_existing=True,
                 )
 
-            run_git.assert_called_once()
-            pull_args = run_git.call_args[0][0]
-            self.assertEqual(pull_args, ["git", "pull"])
+            run_git.assert_called_once_with(["git", "pull"], cwd=repo_root)
 
 
 if __name__ == "__main__":
