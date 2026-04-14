@@ -137,6 +137,40 @@ class CliTests(unittest.TestCase):
             self.assertTrue((home / ".skills" / "custom" / "skill-install-plus-plus" / "SKILL.md").is_file())
 
 
+class AlignCliTests(unittest.TestCase):
+    def test_align_dry_run_prints_issues_and_no_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            skill_dir = home / ".skills" / "custom" / "local-skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: local-skill\n---\n", encoding="utf-8")
+
+            stdout = StringIO()
+            with mock.patch("sys.stdout", stdout):
+                exit_code = main(["--home", str(home), "align"])
+
+            self.assertEqual(exit_code, 0)
+            output = stdout.getvalue()
+            self.assertIn("missing_exposure", output)
+            self.assertNotIn("Alignment actions:", output)
+
+    def test_align_apply_prints_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            skill_dir = home / ".skills" / "custom" / "local-skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: local-skill\n---\n", encoding="utf-8")
+
+            stdout = StringIO()
+            with mock.patch("sys.stdout", stdout):
+                exit_code = main(["--home", str(home), "align", "--apply"])
+
+            self.assertEqual(exit_code, 0)
+            output = stdout.getvalue()
+            self.assertIn("Alignment actions:", output)
+            self.assertIn("local-skill", output)
+
+
 class PluginCliTests(unittest.TestCase):
     def test_install_plugin_command_normalizes_bundle_and_exports_skills(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
