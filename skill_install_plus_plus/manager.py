@@ -167,7 +167,7 @@ def _is_junction(path: Path) -> bool:
 
 
 def _is_link(path: Path) -> bool:
-    return path.is_symlink() or _is_junction(path)
+    return path.is_symlink() or _is_junction(path) or (_path_exists_or_links(path) and not path.exists())
 
 
 def _link_type(path: Path) -> str:
@@ -548,17 +548,28 @@ class WorkspaceRoots:
         return bundles
 
     def _discover_manual_bundles(self) -> list[PluginBundle]:
+        scan_roots: list[tuple[Path, str]] = [
+            (self.home / ".codex", "codex"),
+            (self.home / ".agents", "codex"),
+            (self.home / ".claude", "claude"),
+        ]
+        seen: set[Path] = set()
         bundles: list[PluginBundle] = []
-        for bundle_root in _manual_bundle_candidates(self.home / ".codex"):
-            bundles.append(
-                self._plugin_bundle_from_path(
-                    bundle_root,
-                    publisher=bundle_root.parent.name,
-                    name=bundle_root.name,
-                    bundle_type="manual",
-                    detected_client="codex",
+        for root, client_label in scan_roots:
+            for bundle_root in _manual_bundle_candidates(root):
+                resolved = _safe_resolve(bundle_root)
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                bundles.append(
+                    self._plugin_bundle_from_path(
+                        bundle_root,
+                        publisher=bundle_root.parent.name,
+                        name=bundle_root.name,
+                        bundle_type="manual",
+                        detected_client=client_label,
+                    )
                 )
-            )
         return bundles
 
     def load_registry(self) -> RegistryState:
@@ -643,7 +654,7 @@ class WorkspaceRoots:
         source_target = _safe_resolve(source.path)
 
         for client in CLIENT_NAMES:
-            matches = [item for item in client_skills.get(client, []) if item.skill_name == source.name]
+            matches = self._matching_client_entries(client_skills, client, source.name, source.path)
             exact = [item for item in matches if item.resolved_skill_dir == source_target]
             if exact:
                 continue
@@ -678,7 +689,7 @@ class WorkspaceRoots:
         for skill_name, skill_dir in bundle.exported_skill_dirs.items():
             target = _safe_resolve(skill_dir)
             for client in CLIENT_NAMES:
-                matches = [item for item in client_skills.get(client, []) if item.skill_name == skill_name]
+                matches = self._matching_client_entries(client_skills, client, skill_name, skill_dir)
                 exact = [item for item in matches if item.resolved_skill_dir == target]
                 if exact:
                     continue
@@ -704,6 +715,20 @@ class WorkspaceRoots:
                     )
                 )
         return issues
+
+    def _matching_client_entries(
+        self,
+        client_skills: dict[str, list[ClientSkill]],
+        client: str,
+        skill_name: str,
+        expected_target: Path,
+    ) -> list[ClientSkill]:
+        expected_entry_name = self._client_exposure_path(client, skill_name, expected_target).name
+        return [
+            item
+            for item in client_skills.get(client, [])
+            if item.skill_name == skill_name or item.top_entry.name == expected_entry_name
+        ]
 
     def _classify_misaligned_entries(
         self,
@@ -764,6 +789,20 @@ class WorkspaceRoots:
                             ClientSkill(
                                 client=client,
                                 skill_name=_read_skill_name(entry),
+                                skill_dir=entry,
+                                top_entry=entry,
+                                direct=True,
+                                top_entry_is_link=top_entry_is_link,
+                                top_entry_link_type=top_entry_link_type,
+                                resolved_skill_dir=_safe_resolve(entry),
+                            )
+                        )
+                        continue
+                    if top_entry_is_link and not entry.exists():
+                        items.append(
+                            ClientSkill(
+                                client=client,
+                                skill_name=entry.name,
                                 skill_dir=entry,
                                 top_entry=entry,
                                 direct=True,
@@ -1079,6 +1118,32 @@ class WorkspaceRoots:
                 if not created and message:
                     action = f"{action} ({message})"
                 actions.append(action)
+            elif issue.code == "broken_link":
+                if not issue.path or not issue.target or not issue.client:
+                    continue
+                try:
+                    if _is_link(issue.path):
+                        issue.path.unlink()
+                except OSError as exc:
+                    actions.append(f"Failed to remove broken link {issue.path}: {exc}")
+                    continue
+                try:
+                    created, message = _ensure_directory_link(issue.path, issue.target)
+                except RuntimeError as exc:
+                    actions.append(f"Failed to repair link for {issue.skill_name} in {issue.client}: {exc}")
+                    continue
+                action = f"Repaired broken link for {issue.skill_name} in {issue.client}: {issue.path} -> {issue.target}"
+                if not created and message:
+                    action = f"{action} ({message})"
+                actions.append(action)
+            elif issue.code == "legacy_copy":
+                if not issue.path or not issue.target or not issue.client:
+                    continue
+                actions.append(
+                    f"Manual action required - standalone copy found for {issue.skill_name} in {issue.client}: "
+                    f"inspect, backup, and compare {issue.path} against the managed target {issue.target}, "
+                    f"then remove or migrate the standalone copy and re-run align to create the managed link."
+                )
 
         return self.audit(), actions
 

@@ -218,6 +218,65 @@ class PluginAuditTests(unittest.TestCase):
             self.assertEqual(manual_entries[0][0], "understand-anything-plugin")
             self.assertEqual(report.classification_counts["manual"], 1)
 
+    def test_audit_detects_manual_bundle_in_agents_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            manual_bundle = home / ".agents" / "understand-anything-plugin"
+            (manual_bundle / ".claude-plugin").mkdir(parents=True)
+            (manual_bundle / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
+
+            roots = WorkspaceRoots.for_home(home)
+
+            report = roots.audit()
+
+            manual_entries = [
+                (issue.skill_name, issue.client, issue.code)
+                for issue in report.issues
+                if issue.code == "manual_bundle_detected"
+            ]
+            self.assertIn(("understand-anything-plugin", "codex", "manual_bundle_detected"), manual_entries)
+
+    def test_audit_detects_manual_bundle_in_claude_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            manual_bundle = home / ".claude" / "understand-anything-plugin"
+            (manual_bundle / ".claude-plugin").mkdir(parents=True)
+            (manual_bundle / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
+
+            roots = WorkspaceRoots.for_home(home)
+
+            report = roots.audit()
+
+            manual_entries = [
+                (issue.skill_name, issue.client, issue.code)
+                for issue in report.issues
+                if issue.code == "manual_bundle_detected"
+            ]
+            self.assertIn(("understand-anything-plugin", "claude", "manual_bundle_detected"), manual_entries)
+
+    def test_audit_deduplicates_manual_bundle_when_codex_links_to_agents_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            agents_root = home / ".agents"
+            manual_bundle = agents_root / "understand-anything-plugin"
+            (manual_bundle / ".claude-plugin").mkdir(parents=True)
+            (manual_bundle / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
+            _create_directory_link(home / ".codex", agents_root)
+
+            roots = WorkspaceRoots.for_home(home)
+
+            report = roots.audit()
+
+            manual_entries = [
+                (issue.skill_name, issue.client, issue.code)
+                for issue in report.issues
+                if issue.code == "manual_bundle_detected"
+            ]
+            self.assertEqual(
+                manual_entries,
+                [("understand-anything-plugin", "codex", "manual_bundle_detected")],
+            )
+
     def test_audit_ignores_backup_like_manual_bundle_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -230,6 +289,107 @@ class PluginAuditTests(unittest.TestCase):
             report = roots.audit()
 
             self.assertFalse([issue for issue in report.issues if issue.code == "manual_bundle_detected"])
+
+
+class AlignRepairTests(unittest.TestCase):
+    def test_align_apply_repairs_broken_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            skill_dir = home / ".skills" / "custom" / "local-skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: local-skill\n---\n", encoding="utf-8")
+
+            gone = home / "gone"
+            gone.mkdir()
+            claude_entry = home / ".claude" / "skills" / "local-skill"
+            _create_directory_link(claude_entry, gone)
+            gone.rmdir()
+
+            roots = WorkspaceRoots.for_home(home)
+
+            pre = roots.audit()
+            broken = [i for i in pre.issues if i.code == "broken_link" and i.client == "claude"]
+            self.assertTrue(broken, "expected broken_link issue before align")
+
+            report, actions = roots.align(apply=True)
+
+            self.assertFalse([i for i in report.issues if i.code == "broken_link" and i.client == "claude"])
+            self.assertTrue(any("Repaired broken link" in a for a in actions))
+            self.assertTrue((home / ".claude" / "skills" / "local-skill" / "SKILL.md").is_file())
+
+    def test_align_apply_repairs_broken_link_for_windows_unsafe_skill_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            skill_dir = home / ".skills" / "custom" / "banner-design"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: ckm:banner-design\n---\n", encoding="utf-8")
+
+            gone = home / "gone"
+            gone.mkdir()
+            claude_entry = home / ".claude" / "skills" / "banner-design"
+            _create_directory_link(claude_entry, gone)
+            gone.rmdir()
+
+            roots = WorkspaceRoots.for_home(home)
+
+            pre = roots.audit()
+            broken = [
+                i
+                for i in pre.issues
+                if i.code == "broken_link" and i.client == "claude" and i.skill_name == "ckm:banner-design"
+            ]
+            self.assertTrue(broken, "expected broken_link issue for Windows-unsafe skill before align")
+            self.assertFalse(
+                [
+                    i
+                    for i in pre.issues
+                    if i.code == "missing_exposure" and i.client == "claude" and i.skill_name == "ckm:banner-design"
+                ]
+            )
+
+            report, actions = roots.align(apply=True)
+
+            self.assertFalse(
+                [
+                    i
+                    for i in report.issues
+                    if i.code == "broken_link" and i.client == "claude" and i.skill_name == "ckm:banner-design"
+                ]
+            )
+            self.assertFalse(
+                [
+                    i
+                    for i in report.issues
+                    if i.code == "missing_exposure" and i.client == "claude" and i.skill_name == "ckm:banner-design"
+                ]
+            )
+            self.assertTrue(any("Repaired broken link" in a and "ckm:banner-design" in a for a in actions))
+            self.assertTrue((home / ".claude" / "skills" / "banner-design" / "SKILL.md").is_file())
+
+    def test_align_apply_reports_legacy_copy_without_deleting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            skill_dir = home / ".skills" / "custom" / "local-skill"
+            claude_copy = home / ".claude" / "skills" / "local-skill"
+            skill_dir.mkdir(parents=True)
+            claude_copy.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: local-skill\n---\n", encoding="utf-8")
+            (claude_copy / "SKILL.md").write_text("---\nname: local-skill\n---\n", encoding="utf-8")
+
+            roots = WorkspaceRoots.for_home(home)
+
+            report, actions = roots.align(apply=True)
+
+            self.assertTrue(claude_copy.is_dir())
+            self.assertTrue(
+                any(
+                    "standalone copy" in a.lower()
+                    and "inspect" in a.lower()
+                    and "backup" in a.lower()
+                    and str(skill_dir) in a
+                    for a in actions
+                )
+            )
 
 
 class PluginRegistryTests(unittest.TestCase):
@@ -378,6 +538,62 @@ class RepoInstallTests(unittest.TestCase):
             self.assertTrue((home / ".agents" / "skills" / "banner-design" / "SKILL.md").is_file())
             self.assertTrue((home / ".claude" / "skills" / "banner-design" / "SKILL.md").is_file())
             self.assertTrue((home / ".copilot" / "skills" / "banner-design" / "SKILL.md").is_file())
+
+    def test_install_repo_skills_clones_when_repo_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            roots = WorkspaceRoots.for_home(home)
+
+            # The repo directory does NOT exist yet — install must clone it.
+            repo_root = home / ".skills" / "repos" / "acme" / "toolbox"
+
+            def fake_clone(args: list[str], cwd=None) -> str:
+                # Simulate what git clone would do: create the directory with a skill.
+                skill_dir = Path(args[-1]) / "skills" / "my-skill"
+                skill_dir.mkdir(parents=True)
+                (skill_dir / "SKILL.md").write_text("---\nname: my-skill\n---\n", encoding="utf-8")
+                return ""
+
+            with mock.patch("skill_install_plus_plus.manager._run_git", side_effect=fake_clone) as run_git:
+                result = roots.install_repo_skills(
+                    repo_slug="acme/toolbox",
+                    skill_paths=["skills/my-skill"],
+                )
+
+            run_git.assert_called_once()
+            clone_args = run_git.call_args[0][0]
+            # clone_args is the first positional argument passed to _run_git,
+            # which is the full list: ["git", "clone", "--depth", "1", "--branch", "main", <url>, <dest>]
+            self.assertEqual(clone_args[0], "git")
+            self.assertEqual(clone_args[1], "clone")
+            self.assertIn("--branch", clone_args)
+            self.assertEqual(clone_args[clone_args.index("--branch") + 1], "main")
+            self.assertIn("acme/toolbox", clone_args[-2])  # URL is second-to-last arg
+            self.assertEqual(clone_args[-1], str(repo_root))
+
+            self.assertEqual(len(result.installed), 1)
+            self.assertEqual(result.installed[0].name, "my-skill")
+            self.assertTrue((home / ".claude" / "skills" / "my-skill" / "SKILL.md").is_file())
+
+    def test_install_repo_skills_pulls_when_repo_exists_and_update_existing_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            roots = WorkspaceRoots.for_home(home)
+
+            repo_root = home / ".skills" / "repos" / "acme" / "toolbox"
+            skill_dir = repo_root / "skills" / "my-skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: my-skill\n---\n", encoding="utf-8")
+            (repo_root / ".git").mkdir()  # mark as a git repo
+
+            with mock.patch("skill_install_plus_plus.manager._run_git", return_value="Already up to date.") as run_git:
+                roots.install_repo_skills(
+                    repo_slug="acme/toolbox",
+                    skill_paths=["skills/my-skill"],
+                    update_existing=True,
+                )
+
+            run_git.assert_called_once_with(["git", "pull"], cwd=repo_root)
 
 
 if __name__ == "__main__":
