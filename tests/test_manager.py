@@ -218,6 +218,42 @@ class PluginAuditTests(unittest.TestCase):
             self.assertEqual(manual_entries[0][0], "understand-anything-plugin")
             self.assertEqual(report.classification_counts["manual"], 1)
 
+    def test_audit_detects_manual_bundle_in_agents_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            manual_bundle = home / ".agents" / "understand-anything-plugin"
+            (manual_bundle / ".claude-plugin").mkdir(parents=True)
+            (manual_bundle / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
+
+            roots = WorkspaceRoots.for_home(home)
+
+            report = roots.audit()
+
+            manual_entries = [
+                (issue.skill_name, issue.code)
+                for issue in report.issues
+                if issue.code == "manual_bundle_detected"
+            ]
+            self.assertIn(("understand-anything-plugin", "manual_bundle_detected"), manual_entries)
+
+    def test_audit_detects_manual_bundle_in_claude_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            manual_bundle = home / ".claude" / "understand-anything-plugin"
+            (manual_bundle / ".claude-plugin").mkdir(parents=True)
+            (manual_bundle / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
+
+            roots = WorkspaceRoots.for_home(home)
+
+            report = roots.audit()
+
+            manual_entries = [
+                (issue.skill_name, issue.code)
+                for issue in report.issues
+                if issue.code == "manual_bundle_detected"
+            ]
+            self.assertIn(("understand-anything-plugin", "manual_bundle_detected"), manual_entries)
+
     def test_audit_ignores_backup_like_manual_bundle_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

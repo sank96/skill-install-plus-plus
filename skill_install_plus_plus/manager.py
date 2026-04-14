@@ -548,17 +548,28 @@ class WorkspaceRoots:
         return bundles
 
     def _discover_manual_bundles(self) -> list[PluginBundle]:
+        scan_roots: list[tuple[Path, str]] = [
+            (self.home / ".codex", "codex"),
+            (self.home / ".agents", "codex"),
+            (self.home / ".claude", "claude"),
+        ]
+        seen: set[Path] = set()
         bundles: list[PluginBundle] = []
-        for bundle_root in _manual_bundle_candidates(self.home / ".codex"):
-            bundles.append(
-                self._plugin_bundle_from_path(
-                    bundle_root,
-                    publisher=bundle_root.parent.name,
-                    name=bundle_root.name,
-                    bundle_type="manual",
-                    detected_client="codex",
+        for root, client_label in scan_roots:
+            for bundle_root in _manual_bundle_candidates(root):
+                resolved = _safe_resolve(bundle_root)
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                bundles.append(
+                    self._plugin_bundle_from_path(
+                        bundle_root,
+                        publisher=bundle_root.parent.name,
+                        name=bundle_root.name,
+                        bundle_type="manual",
+                        detected_client=client_label,
+                    )
                 )
-            )
         return bundles
 
     def load_registry(self) -> RegistryState:
