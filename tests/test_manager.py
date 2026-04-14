@@ -258,6 +258,55 @@ class AlignRepairTests(unittest.TestCase):
             self.assertTrue(any("Repaired broken link" in a for a in actions))
             self.assertTrue((home / ".claude" / "skills" / "local-skill" / "SKILL.md").is_file())
 
+    def test_align_apply_repairs_broken_link_for_windows_unsafe_skill_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            skill_dir = home / ".skills" / "custom" / "banner-design"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: ckm:banner-design\n---\n", encoding="utf-8")
+
+            gone = home / "gone"
+            gone.mkdir()
+            claude_entry = home / ".claude" / "skills" / "banner-design"
+            _create_directory_link(claude_entry, gone)
+            gone.rmdir()
+
+            roots = WorkspaceRoots.for_home(home)
+
+            pre = roots.audit()
+            broken = [
+                i
+                for i in pre.issues
+                if i.code == "broken_link" and i.client == "claude" and i.skill_name == "ckm:banner-design"
+            ]
+            self.assertTrue(broken, "expected broken_link issue for Windows-unsafe skill before align")
+            self.assertFalse(
+                [
+                    i
+                    for i in pre.issues
+                    if i.code == "missing_exposure" and i.client == "claude" and i.skill_name == "ckm:banner-design"
+                ]
+            )
+
+            report, actions = roots.align(apply=True)
+
+            self.assertFalse(
+                [
+                    i
+                    for i in report.issues
+                    if i.code == "broken_link" and i.client == "claude" and i.skill_name == "ckm:banner-design"
+                ]
+            )
+            self.assertFalse(
+                [
+                    i
+                    for i in report.issues
+                    if i.code == "missing_exposure" and i.client == "claude" and i.skill_name == "ckm:banner-design"
+                ]
+            )
+            self.assertTrue(any("Repaired broken link" in a and "ckm:banner-design" in a for a in actions))
+            self.assertTrue((home / ".claude" / "skills" / "banner-design" / "SKILL.md").is_file())
+
     def test_align_apply_reports_legacy_copy_without_deleting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -273,7 +322,15 @@ class AlignRepairTests(unittest.TestCase):
             report, actions = roots.align(apply=True)
 
             self.assertTrue(claude_copy.is_dir())
-            self.assertTrue(any("legacy_copy" in a.lower() or "standalone copy" in a.lower() for a in actions))
+            self.assertTrue(
+                any(
+                    "standalone copy" in a.lower()
+                    and "inspect" in a.lower()
+                    and "backup" in a.lower()
+                    and str(skill_dir) in a
+                    for a in actions
+                )
+            )
 
 
 class PluginRegistryTests(unittest.TestCase):

@@ -643,7 +643,7 @@ class WorkspaceRoots:
         source_target = _safe_resolve(source.path)
 
         for client in CLIENT_NAMES:
-            matches = [item for item in client_skills.get(client, []) if item.skill_name == source.name]
+            matches = self._matching_client_entries(client_skills, client, source.name, source.path)
             exact = [item for item in matches if item.resolved_skill_dir == source_target]
             if exact:
                 continue
@@ -678,7 +678,7 @@ class WorkspaceRoots:
         for skill_name, skill_dir in bundle.exported_skill_dirs.items():
             target = _safe_resolve(skill_dir)
             for client in CLIENT_NAMES:
-                matches = [item for item in client_skills.get(client, []) if item.skill_name == skill_name]
+                matches = self._matching_client_entries(client_skills, client, skill_name, skill_dir)
                 exact = [item for item in matches if item.resolved_skill_dir == target]
                 if exact:
                     continue
@@ -704,6 +704,20 @@ class WorkspaceRoots:
                     )
                 )
         return issues
+
+    def _matching_client_entries(
+        self,
+        client_skills: dict[str, list[ClientSkill]],
+        client: str,
+        skill_name: str,
+        expected_target: Path,
+    ) -> list[ClientSkill]:
+        expected_entry_name = self._client_exposure_path(client, skill_name, expected_target).name
+        return [
+            item
+            for item in client_skills.get(client, [])
+            if item.skill_name == skill_name or item.top_entry.name == expected_entry_name
+        ]
 
     def _classify_misaligned_entries(
         self,
@@ -1116,7 +1130,8 @@ class WorkspaceRoots:
                     continue
                 actions.append(
                     f"Manual action required - standalone copy found for {issue.skill_name} in {issue.client}: "
-                    f"delete {issue.path} then re-run align to create the managed link."
+                    f"inspect, backup, and compare {issue.path} against the managed target {issue.target}, "
+                    f"then remove or migrate the standalone copy and re-run align to create the managed link."
                 )
 
         return self.audit(), actions
