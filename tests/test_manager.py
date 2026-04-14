@@ -379,6 +379,61 @@ class RepoInstallTests(unittest.TestCase):
             self.assertTrue((home / ".claude" / "skills" / "banner-design" / "SKILL.md").is_file())
             self.assertTrue((home / ".copilot" / "skills" / "banner-design" / "SKILL.md").is_file())
 
+    def test_install_repo_skills_clones_when_repo_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            roots = WorkspaceRoots.for_home(home)
+
+            # The repo directory does NOT exist yet — install must clone it.
+            repo_root = home / ".skills" / "repos" / "acme" / "toolbox"
+
+            def fake_clone(args: list[str], cwd=None) -> str:
+                # Simulate what git clone would do: create the directory with a skill.
+                skill_dir = repo_root / "skills" / "my-skill"
+                skill_dir.mkdir(parents=True)
+                (skill_dir / "SKILL.md").write_text("---\nname: my-skill\n---\n", encoding="utf-8")
+                return ""
+
+            with mock.patch("skill_install_plus_plus.manager._run_git", side_effect=fake_clone) as run_git:
+                result = roots.install_repo_skills(
+                    repo_slug="acme/toolbox",
+                    skill_paths=["skills/my-skill"],
+                )
+
+            run_git.assert_called_once()
+            clone_args = run_git.call_args[0][0]
+            # clone_args is the first positional argument passed to _run_git,
+            # which is the full list: ["git", "clone", "--depth", "1", "--branch", "main", <url>, <dest>]
+            self.assertEqual(clone_args[0], "git")
+            self.assertEqual(clone_args[1], "clone")
+            self.assertIn("acme/toolbox", clone_args[-2])  # URL is second-to-last arg
+
+            self.assertEqual(len(result.installed), 1)
+            self.assertEqual(result.installed[0].name, "my-skill")
+            self.assertTrue((home / ".claude" / "skills" / "my-skill" / "SKILL.md").is_file())
+
+    def test_install_repo_skills_pulls_when_repo_exists_and_update_existing_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            roots = WorkspaceRoots.for_home(home)
+
+            repo_root = home / ".skills" / "repos" / "acme" / "toolbox"
+            skill_dir = repo_root / "skills" / "my-skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: my-skill\n---\n", encoding="utf-8")
+            (repo_root / ".git").mkdir()  # mark as a git repo
+
+            with mock.patch("skill_install_plus_plus.manager._run_git", return_value="Already up to date.") as run_git:
+                roots.install_repo_skills(
+                    repo_slug="acme/toolbox",
+                    skill_paths=["skills/my-skill"],
+                    update_existing=True,
+                )
+
+            run_git.assert_called_once()
+            pull_args = run_git.call_args[0][0]
+            self.assertEqual(pull_args, ["git", "pull"])
+
 
 if __name__ == "__main__":
     unittest.main()
