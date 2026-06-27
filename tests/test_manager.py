@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from skill_install_plus_plus.manager import PluginRecord, WorkspaceRoots, _create_directory_link
+from skill_install_plus_plus.manager import PluginRecord, WorkspaceRoots, _create_directory_link, _is_junction
 
 
 class WorkspaceRootsTests(unittest.TestCase):
@@ -29,6 +29,19 @@ class WorkspaceRootsTests(unittest.TestCase):
         self.assertEqual(roots.codex_root, home / ".agents" / "skills")
         self.assertEqual(roots.claude_root, home / ".claude" / "skills")
         self.assertEqual(roots.copilot_root, home / ".copilot" / "skills")
+
+    def test_is_junction_falls_back_to_windows_reparse_attribute(self) -> None:
+        path = Path("C:/Users/example/.agents/skills/design")
+
+        with mock.patch("skill_install_plus_plus.manager.os.name", "nt"), mock.patch(
+            "skill_install_plus_plus.manager.os.path.isjunction",
+            side_effect=AttributeError,
+            create=True,
+        ), mock.patch(
+            "skill_install_plus_plus.manager.os.lstat",
+            return_value=mock.Mock(st_file_attributes=0x400),
+        ), mock.patch.object(Path, "is_dir", return_value=True):
+            self.assertTrue(_is_junction(path))
 
 
 class DiscoveryTests(unittest.TestCase):

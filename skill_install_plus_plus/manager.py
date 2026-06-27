@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 from typing import Iterable
 import yaml
@@ -189,7 +190,14 @@ def _is_junction(path: Path) -> bool:
     try:
         return os.path.isjunction(path)
     except AttributeError:
+        pass
+    if os.name != "nt":
         return False
+    try:
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)) and path.is_dir()
 
 
 def _is_link(path: Path) -> bool:
