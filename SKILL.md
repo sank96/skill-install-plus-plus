@@ -19,16 +19,28 @@ Use this skill for skill management in this workspace.
 
 ## Commands
 
+- Interactive installer/status:
+  - `node install.mjs --status`
+  - `node install.mjs --dry-run --yes`
+  - `node install.mjs`
+- Installer guardrail:
+  - `npm run check`
 - Audit:
-  - `uv run python skill-install-plus-plus/scripts/skill_install_plus_plus.py audit`
+  - `uv run skillpp audit`
 - Install from GitHub:
-  - `uv run python skill-install-plus-plus/scripts/skill_install_plus_plus.py install --repo <owner>/<repo> --path <skill/path>`
+  - `uv run skillpp install --repo <owner>/<repo> --path <skill/path>`
 - Install a plugin bundle:
-  - `uv run python skill-install-plus-plus/scripts/skill_install_plus_plus.py install-plugin --publisher <publisher> --name <name> --source <path>`
+  - `uv run skillpp install-plugin --publisher <publisher> --name <name> --source <path>`
+  - Native client plugin install/update is enabled by default when `claude`, `codex`, or `copilot` are available.
+  - Preview native commands with `uv run skillpp install-plugin --publisher <publisher> --name <name> --repo <owner>/<repo> --native-dry-run`.
+  - Use `--no-native` only when intentionally exposing exported skills without client-native hooks/MCP/plugin metadata.
+- Remove a managed custom skill:
+  - `uv run skillpp remove <skill-name>`
+  - `uv run skillpp remove <skill-name> --apply`
 - Update managed repos:
-  - `uv run python skill-install-plus-plus/scripts/skill_install_plus_plus.py update`
+  - `uv run skillpp update`
 - Align after confirmation:
-  - `uv run python skill-install-plus-plus/scripts/skill_install_plus_plus.py align --apply`
+  - `uv run skillpp align --apply`
 
 ## Client policy
 

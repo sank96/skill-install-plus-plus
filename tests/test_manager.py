@@ -51,6 +51,64 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(repo_source.owner, "acme")
             self.assertEqual(repo_source.repo, "toolbox")
 
+    def test_discover_sources_groups_provider_specific_repo_skills(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            repo_root = home / ".skills" / "repos" / "pbakaus" / "impeccable"
+            (repo_root / ".git").mkdir(parents=True)
+            for relative in [
+                ".agents/skills/harden",
+                ".claude/skills/harden",
+                ".codex/skills/harden",
+                ".cursor/skills/harden",
+                ".github/skills/harden",
+                "source/skills/harden",
+            ]:
+                skill_dir = repo_root / relative
+                skill_dir.mkdir(parents=True)
+                (skill_dir / "SKILL.md").write_text("---\nname: harden\n---\n", encoding="utf-8")
+
+            roots = WorkspaceRoots.for_home(home)
+
+            discovered = roots.discover_sources()
+
+            self.assertEqual([item.name for item in discovered], ["harden"])
+            source = discovered[0]
+            self.assertEqual(set(source.client_paths), {"codex", "claude", "copilot"})
+            self.assertEqual(source.client_paths["codex"], repo_root / ".codex" / "skills" / "harden")
+            self.assertEqual(source.client_paths["claude"], repo_root / ".claude" / "skills" / "harden")
+            self.assertEqual(source.client_paths["copilot"], repo_root / ".github" / "skills" / "harden")
+            self.assertEqual(source.path, repo_root / ".codex" / "skills" / "harden")
+
+    def test_discover_sources_groups_plugin_provider_specific_repo_skills(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            repo_root = home / ".skills" / "repos" / "upstash" / "context7"
+            (repo_root / ".git").mkdir(parents=True)
+            for relative in [
+                "skills/context7-mcp",
+                "plugins/claude/context7/skills/context7-mcp",
+                "plugins/codex/context7/skills/context7-mcp",
+                "plugins/copilot/context7/skills/context7-mcp",
+                "plugins/cursor/context7/skills/context7-mcp",
+                "packages/pi/skills/context7-docs",
+            ]:
+                skill_dir = repo_root / relative
+                skill_dir.mkdir(parents=True)
+                skill_name = "context7-docs" if "context7-docs" in relative else "context7-mcp"
+                (skill_dir / "SKILL.md").write_text(f"---\nname: {skill_name}\n---\n", encoding="utf-8")
+
+            roots = WorkspaceRoots.for_home(home)
+
+            discovered = roots.discover_sources()
+
+            self.assertEqual([item.name for item in discovered], ["context7-mcp"])
+            source = discovered[0]
+            self.assertEqual(set(source.client_paths), {"codex", "claude", "copilot"})
+            self.assertEqual(source.client_paths["codex"], repo_root / "plugins" / "codex" / "context7" / "skills" / "context7-mcp")
+            self.assertEqual(source.client_paths["claude"], repo_root / "plugins" / "claude" / "context7" / "skills" / "context7-mcp")
+            self.assertEqual(source.client_paths["copilot"], repo_root / "plugins" / "copilot" / "context7" / "skills" / "context7-mcp")
+
 
 class PluginDiscoveryTests(unittest.TestCase):
     def test_discover_plugin_bundles_finds_managed_plugins_and_hybrid_repos(self) -> None:
@@ -142,6 +200,147 @@ class AuditTests(unittest.TestCase):
             legacy = {(issue.skill_name, issue.client, issue.code) for issue in report.issues}
             self.assertIn(("local-skill", "claude", "legacy_copy"), legacy)
 
+    def test_audit_reports_invalid_skill_name_for_all_clients(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            skill_dir = home / ".skills" / "custom" / "banner-design"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: ckm:banner-design\n---\n", encoding="utf-8")
+
+            roots = WorkspaceRoots.for_home(home)
+
+            report = roots.audit()
+
+            invalid = {(issue.skill_name, issue.client, issue.code) for issue in report.issues}
+            self.assertIn(("ckm:banner-design", "codex", "invalid_skill_name"), invalid)
+            self.assertIn(("ckm:banner-design", "claude", "invalid_skill_name"), invalid)
+            self.assertIn(("ckm:banner-design", "copilot", "invalid_skill_name"), invalid)
+
+    def test_audit_reports_invalid_skill_frontmatter_for_all_clients(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            skill_dir = home / ".skills" / "custom" / "harden"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: harden\n"
+                "description: Make interfaces production-ready: error handling\n"
+                "---\n",
+                encoding="utf-8",
+            )
+
+            roots = WorkspaceRoots.for_home(home)
+
+            report = roots.audit()
+
+            invalid = {(issue.skill_name, issue.client, issue.code) for issue in report.issues}
+            self.assertIn(("harden", "codex", "invalid_skill_frontmatter"), invalid)
+            self.assertIn(("harden", "claude", "invalid_skill_frontmatter"), invalid)
+            self.assertIn(("harden", "copilot", "invalid_skill_frontmatter"), invalid)
+            self.assertTrue(any("invalid YAML" in issue.message for issue in report.issues if issue.skill_name == "harden"))
+
+    def test_audit_uses_provider_specific_repo_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            repo_root = home / ".skills" / "repos" / "pbakaus" / "impeccable"
+            (repo_root / ".git").mkdir(parents=True)
+            codex_skill = repo_root / ".codex" / "skills" / "harden"
+            claude_skill = repo_root / ".claude" / "skills" / "harden"
+            ignored_skill = repo_root / ".cursor" / "skills" / "harden"
+            for skill_dir in [codex_skill, claude_skill, ignored_skill]:
+                skill_dir.mkdir(parents=True)
+                (skill_dir / "SKILL.md").write_text("---\nname: harden\n---\n", encoding="utf-8")
+
+            roots = WorkspaceRoots.for_home(home)
+            _create_directory_link(home / ".agents" / "skills" / "harden", codex_skill)
+            _create_directory_link(home / ".claude" / "skills" / "harden", claude_skill)
+
+            report = roots.audit()
+
+            self.assertEqual([source.name for source in report.sources], ["harden"])
+            harden_issues = [issue for issue in report.issues if issue.skill_name == "harden"]
+            self.assertEqual(harden_issues, [])
+
+    def test_audit_uses_generic_repo_skill_as_missing_provider_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            repo_root = home / ".skills" / "repos" / "nextlevelbuilder" / "ui-ux-pro-max-skill"
+            generic_skill = repo_root / "cli" / "assets" / "skills" / "design"
+            claude_skill = repo_root / ".claude" / "skills" / "design"
+            for skill_dir in [generic_skill, claude_skill]:
+                skill_dir.mkdir(parents=True)
+                (skill_dir / "SKILL.md").write_text("---\nname: design\n---\n", encoding="utf-8")
+            (repo_root / ".git").mkdir()
+
+            roots = WorkspaceRoots.for_home(home)
+            _create_directory_link(home / ".agents" / "skills" / "design", generic_skill)
+            _create_directory_link(home / ".claude" / "skills" / "design", claude_skill)
+            _create_directory_link(home / ".copilot" / "skills" / "design", generic_skill)
+
+            report = roots.audit()
+
+            self.assertEqual([source.name for source in report.sources], ["design"])
+            source = report.sources[0]
+            self.assertEqual(source.client_paths["codex"], generic_skill)
+            self.assertEqual(source.client_paths["claude"], claude_skill)
+            self.assertEqual(source.client_paths["copilot"], generic_skill)
+            design_issues = [issue for issue in report.issues if issue.skill_name == "design"]
+            self.assertEqual(design_issues, [])
+
+    def test_audit_uses_primary_repo_skill_as_declared_client_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            repo_root = home / ".skills" / "repos" / "nextlevelbuilder" / "ui-ux-pro-max-skill"
+            primary_skill = repo_root / ".claude" / "skills" / "ui-ux-pro-max"
+            primary_skill.mkdir(parents=True)
+            (repo_root / ".git").mkdir()
+            (repo_root / "skill.json").write_text(
+                '{"name":"ui-ux-pro-max","platforms":["claude","codex","copilot"]}',
+                encoding="utf-8",
+            )
+            (primary_skill / "SKILL.md").write_text("---\nname: ui-ux-pro-max\n---\n", encoding="utf-8")
+
+            roots = WorkspaceRoots.for_home(home)
+            _create_directory_link(home / ".agents" / "skills" / "ui-ux-pro-max", primary_skill)
+            _create_directory_link(home / ".claude" / "skills" / "ui-ux-pro-max", primary_skill)
+            _create_directory_link(home / ".copilot" / "skills" / "ui-ux-pro-max", primary_skill)
+
+            report = roots.audit()
+
+            self.assertEqual([source.name for source in report.sources], ["ui-ux-pro-max"])
+            source = report.sources[0]
+            self.assertEqual(source.client_paths["codex"], primary_skill)
+            self.assertEqual(source.client_paths["claude"], primary_skill)
+            self.assertEqual(source.client_paths["copilot"], primary_skill)
+            primary_issues = [issue for issue in report.issues if issue.skill_name == "ui-ux-pro-max"]
+            self.assertEqual(primary_issues, [])
+
+    def test_audit_reports_stale_managed_client_links(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            repo_root = home / ".skills" / "repos" / "pbakaus" / "impeccable"
+            current_skill = repo_root / ".agents" / "skills" / "impeccable"
+            old_skill = repo_root / ".codex" / "skills" / "harden"
+            current_skill.mkdir(parents=True)
+            old_skill.mkdir(parents=True)
+            (repo_root / ".git").mkdir()
+            (current_skill / "SKILL.md").write_text("---\nname: impeccable\n---\n", encoding="utf-8")
+            (old_skill / "SKILL.md").write_text("---\nname: harden\n---\n", encoding="utf-8")
+            _create_directory_link(home / ".agents" / "skills" / "harden", old_skill)
+            (old_skill / "SKILL.md").unlink()
+            old_skill.rmdir()
+
+            roots = WorkspaceRoots.for_home(home)
+
+            report = roots.audit()
+
+            stale = [
+                issue
+                for issue in report.issues
+                if issue.skill_name == "harden" and issue.client == "codex" and issue.code == "stale_managed_exposure"
+            ]
+            self.assertEqual(len(stale), 1)
+
 
 class PluginAuditTests(unittest.TestCase):
     def test_audit_reports_missing_plugin_injections_and_manual_bundles(self) -> None:
@@ -171,6 +370,102 @@ class PluginAuditTests(unittest.TestCase):
             self.assertIn(("understand-anything-plugin", "codex", "manual_bundle_detected"), plugin_missing)
             self.assertEqual(report.classification_counts["plugin-managed"], 1)
             self.assertEqual(report.classification_counts["manual"], 1)
+
+    def test_audit_skips_plugin_injections_for_native_installed_clients(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            plugin_bundle = home / ".skills" / "plugins" / "sprint-reply" / "sprint-tool"
+            (plugin_bundle / ".codex-plugin").mkdir(parents=True)
+            (plugin_bundle / "skills" / "sprint-tool-reviewer").mkdir(parents=True)
+            (plugin_bundle / ".codex-plugin" / "plugin.json").write_text('{"name":"sprint-tool"}', encoding="utf-8")
+            (plugin_bundle / "skills" / "sprint-tool-reviewer" / "SKILL.md").write_text(
+                "---\nname: sprint-tool-reviewer\n---\n",
+                encoding="utf-8",
+            )
+
+            roots = WorkspaceRoots.for_home(home)
+
+            with mock.patch("skill_install_plus_plus.manager.shutil.which", return_value="plugin-cli"), mock.patch.object(
+                WorkspaceRoots,
+                "_native_plugin_installed",
+                side_effect=lambda client, plugin_name, marketplace_name, cli_path=None: (
+                    client in {"codex", "claude"} and marketplace_name == "sprint-tool-skills"
+                ),
+            ):
+                report = roots.audit()
+
+            plugin_missing = {
+                (issue.skill_name, issue.client, issue.code)
+                for issue in report.issues
+                if issue.skill_name == "sprint-tool-reviewer"
+            }
+            self.assertNotIn(("sprint-tool-reviewer", "codex", "missing_plugin_injection"), plugin_missing)
+            self.assertNotIn(("sprint-tool-reviewer", "claude", "missing_plugin_injection"), plugin_missing)
+            self.assertIn(("sprint-tool-reviewer", "copilot", "missing_plugin_injection"), plugin_missing)
+
+    def test_native_plugin_installed_uses_cached_plugin_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            roots = WorkspaceRoots.for_home(Path(tmp))
+            output = json.dumps(
+                {
+                    "installed": [
+                        {
+                            "pluginId": "sprint-tool@sprint-tool-skills",
+                            "name": "sprint-tool",
+                            "marketplaceName": "sprint-tool-skills",
+                        }
+                    ]
+                }
+            )
+
+            with mock.patch("skill_install_plus_plus.manager._run_captured", return_value=(True, output)) as run:
+                self.assertTrue(
+                    roots._native_plugin_installed(
+                        "codex",
+                        "sprint-tool",
+                        "sprint-tool-skills",
+                        cli_path="plugin-cli",
+                    )
+                )
+                self.assertTrue(
+                    roots._native_plugin_installed(
+                        "codex",
+                        "sprint-tool",
+                        "sprint-tool-skills",
+                        cli_path="plugin-cli",
+                    )
+                )
+
+            run.assert_called_once_with(["plugin-cli", "plugin", "list", "--json"], timeout=30)
+
+    def test_audit_does_not_double_inject_hybrid_plugin_skill_when_provider_output_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            repo_root = home / ".skills" / "repos" / "pbakaus" / "impeccable"
+            agents_skill = repo_root / ".agents" / "skills" / "impeccable"
+            claude_skill = repo_root / ".claude" / "skills" / "impeccable"
+            copilot_skill = repo_root / ".github" / "skills" / "impeccable"
+            plugin_skill = repo_root / "plugin" / "skills" / "impeccable"
+            for skill_dir in [agents_skill, claude_skill, copilot_skill, plugin_skill]:
+                skill_dir.mkdir(parents=True)
+                (skill_dir / "SKILL.md").write_text("---\nname: impeccable\n---\n", encoding="utf-8")
+            (repo_root / ".claude-plugin").mkdir(parents=True)
+            (repo_root / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
+            (repo_root / ".git").mkdir()
+            _create_directory_link(home / ".agents" / "skills" / "impeccable", agents_skill)
+            _create_directory_link(home / ".claude" / "skills" / "impeccable", claude_skill)
+            _create_directory_link(home / ".copilot" / "skills" / "impeccable", copilot_skill)
+
+            roots = WorkspaceRoots.for_home(home)
+
+            report = roots.audit()
+
+            plugin_issues = [
+                issue
+                for issue in report.issues
+                if issue.skill_name == "impeccable" and issue.code == "missing_plugin_injection"
+            ]
+            self.assertEqual(plugin_issues, [])
 
     def test_align_apply_creates_exported_plugin_skill_exposures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -217,6 +512,51 @@ class PluginAuditTests(unittest.TestCase):
             self.assertEqual(len(manual_entries), 1)
             self.assertEqual(manual_entries[0][0], "understand-anything-plugin")
             self.assertEqual(report.classification_counts["manual"], 1)
+
+    def test_audit_reports_invalid_plugin_exported_skill_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            plugin_bundle = home / ".skills" / "plugins" / "acme" / "suite"
+            (plugin_bundle / ".claude-plugin").mkdir(parents=True)
+            (plugin_bundle / "skills" / "banner-design").mkdir(parents=True)
+            (plugin_bundle / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
+            (plugin_bundle / "skills" / "banner-design" / "SKILL.md").write_text(
+                "---\nname: ckm:banner-design\n---\n",
+                encoding="utf-8",
+            )
+
+            roots = WorkspaceRoots.for_home(home)
+
+            report = roots.audit()
+
+            invalid = {(issue.skill_name, issue.client, issue.code) for issue in report.issues}
+            self.assertIn(("ckm:banner-design", "codex", "invalid_skill_name"), invalid)
+            self.assertIn(("ckm:banner-design", "claude", "invalid_skill_name"), invalid)
+            self.assertIn(("ckm:banner-design", "copilot", "invalid_skill_name"), invalid)
+
+    def test_audit_reports_invalid_plugin_exported_skill_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            plugin_bundle = home / ".skills" / "plugins" / "acme" / "suite"
+            (plugin_bundle / ".claude-plugin").mkdir(parents=True)
+            (plugin_bundle / "skills" / "harden").mkdir(parents=True)
+            (plugin_bundle / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
+            (plugin_bundle / "skills" / "harden" / "SKILL.md").write_text(
+                "---\n"
+                "name: harden\n"
+                "description: Make interfaces production-ready: error handling\n"
+                "---\n",
+                encoding="utf-8",
+            )
+
+            roots = WorkspaceRoots.for_home(home)
+
+            report = roots.audit()
+
+            invalid = {(issue.skill_name, issue.client, issue.code) for issue in report.issues}
+            self.assertIn(("harden", "codex", "invalid_skill_frontmatter"), invalid)
+            self.assertIn(("harden", "claude", "invalid_skill_frontmatter"), invalid)
+            self.assertIn(("harden", "copilot", "invalid_skill_frontmatter"), invalid)
 
     def test_audit_detects_manual_bundle_in_agents_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -317,7 +657,7 @@ class AlignRepairTests(unittest.TestCase):
             self.assertTrue(any("Repaired broken link" in a for a in actions))
             self.assertTrue((home / ".claude" / "skills" / "local-skill" / "SKILL.md").is_file())
 
-    def test_align_apply_repairs_broken_link_for_windows_unsafe_skill_name(self) -> None:
+    def test_align_apply_reports_invalid_skill_name_for_windows_unsafe_skill_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             skill_dir = home / ".skills" / "custom" / "banner-design"
@@ -333,12 +673,12 @@ class AlignRepairTests(unittest.TestCase):
             roots = WorkspaceRoots.for_home(home)
 
             pre = roots.audit()
-            broken = [
+            invalid = [
                 i
                 for i in pre.issues
-                if i.code == "broken_link" and i.client == "claude" and i.skill_name == "ckm:banner-design"
+                if i.code == "invalid_skill_name" and i.client == "claude" and i.skill_name == "ckm:banner-design"
             ]
-            self.assertTrue(broken, "expected broken_link issue for Windows-unsafe skill before align")
+            self.assertTrue(invalid, "expected invalid_skill_name issue for Windows-unsafe skill")
             self.assertFalse(
                 [
                     i
@@ -349,22 +689,15 @@ class AlignRepairTests(unittest.TestCase):
 
             report, actions = roots.align(apply=True)
 
-            self.assertFalse(
+            self.assertTrue(
                 [
                     i
                     for i in report.issues
-                    if i.code == "broken_link" and i.client == "claude" and i.skill_name == "ckm:banner-design"
+                    if i.code == "invalid_skill_name" and i.client == "claude" and i.skill_name == "ckm:banner-design"
                 ]
             )
-            self.assertFalse(
-                [
-                    i
-                    for i in report.issues
-                    if i.code == "missing_exposure" and i.client == "claude" and i.skill_name == "ckm:banner-design"
-                ]
-            )
-            self.assertTrue(any("Repaired broken link" in a and "ckm:banner-design" in a for a in actions))
-            self.assertTrue((home / ".claude" / "skills" / "banner-design" / "SKILL.md").is_file())
+            self.assertTrue(any("incompatible skill name" in a and "ckm:banner-design" in a for a in actions))
+            self.assertFalse((home / ".claude" / "skills" / "banner-design" / "SKILL.md").is_file())
 
     def test_align_apply_reports_legacy_copy_without_deleting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -390,6 +723,33 @@ class AlignRepairTests(unittest.TestCase):
                     for a in actions
                 )
             )
+
+    def test_align_apply_updates_managed_link_target_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            repo_root = home / ".skills" / "repos" / "nextlevelbuilder" / "ui-ux-pro-max-skill"
+            old_skill = repo_root / ".claude" / "skills" / "design"
+            current_skill = repo_root / "cli" / "assets" / "skills" / "design"
+            for skill_dir in [old_skill, current_skill]:
+                skill_dir.mkdir(parents=True)
+                (skill_dir / "SKILL.md").write_text("---\nname: design\n---\n", encoding="utf-8")
+            (repo_root / ".git").mkdir()
+
+            _create_directory_link(home / ".agents" / "skills" / "design", old_skill)
+            _create_directory_link(home / ".claude" / "skills" / "design", old_skill)
+            _create_directory_link(home / ".copilot" / "skills" / "design", old_skill)
+
+            roots = WorkspaceRoots.for_home(home)
+
+            pre = roots.audit()
+            self.assertIn(("design", "codex", "target_mismatch"), {(i.skill_name, i.client, i.code) for i in pre.issues})
+
+            report, actions = roots.align(apply=True)
+
+            self.assertFalse([issue for issue in report.issues if issue.skill_name == "design"])
+            self.assertEqual((home / ".agents" / "skills" / "design").resolve(strict=False), current_skill.resolve())
+            self.assertEqual((home / ".copilot" / "skills" / "design").resolve(strict=False), current_skill.resolve())
+            self.assertTrue(any("Updated skill link target for design in codex" in action for action in actions))
 
 
 class PluginRegistryTests(unittest.TestCase):
@@ -515,9 +875,76 @@ class BootstrapTests(unittest.TestCase):
             codex_policy = (home / ".codex" / "AGENTS.override.md").read_text(encoding="utf-8")
             self.assertEqual(codex_policy.count("skill-install-plus-plus"), 1)
 
+    def test_bootstrap_self_rejects_invalid_skill_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            source_root = home / "projects" / "banner-design"
+            source_root.mkdir(parents=True)
+            (source_root / "SKILL.md").write_text("---\nname: ckm:banner-design\n---\n", encoding="utf-8")
+
+            roots = WorkspaceRoots.for_home(home)
+
+            with self.assertRaisesRegex(RuntimeError, "ckm:banner-design"):
+                roots.bootstrap_self(source_root)
+
+    def test_bootstrap_self_rejects_invalid_skill_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            source_root = home / "projects" / "harden"
+            source_root.mkdir(parents=True)
+            (source_root / "SKILL.md").write_text(
+                "---\n"
+                "name: harden\n"
+                "description: Make interfaces production-ready: error handling\n"
+                "---\n",
+                encoding="utf-8",
+            )
+
+            roots = WorkspaceRoots.for_home(home)
+
+            with self.assertRaisesRegex(RuntimeError, "Invalid skill frontmatter"):
+                roots.bootstrap_self(source_root)
+
+
+class RemoveCustomSkillTests(unittest.TestCase):
+    def test_remove_custom_skill_dry_run_then_apply_removes_empty_source_and_links(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            roots = WorkspaceRoots.for_home(home)
+            source = home / ".skills" / "custom" / "codex-mem"
+            source.mkdir(parents=True)
+            _create_directory_link(home / ".agents" / "skills" / "codex-mem", source)
+
+            dry = roots.remove_custom_skill("codex-mem")
+
+            self.assertFalse(dry.applied)
+            self.assertIn(source, dry.planned_paths)
+            self.assertTrue(source.exists())
+            self.assertTrue((home / ".agents" / "skills" / "codex-mem").exists())
+
+            applied = roots.remove_custom_skill("codex-mem", apply=True)
+
+            self.assertTrue(applied.applied)
+            self.assertIn(source, applied.removed_paths)
+            self.assertFalse(source.exists())
+            self.assertFalse((home / ".agents" / "skills" / "codex-mem").exists())
+
+    def test_remove_custom_skill_does_not_delete_non_empty_source_without_force(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            roots = WorkspaceRoots.for_home(home)
+            source = home / ".skills" / "custom" / "local-skill"
+            source.mkdir(parents=True)
+            (source / "SKILL.md").write_text("---\nname: local-skill\n---\n", encoding="utf-8")
+
+            result = roots.remove_custom_skill("local-skill", apply=True)
+
+            self.assertTrue(source.exists())
+            self.assertTrue(any("non-empty custom source" in item for item in result.skipped))
+
 
 class RepoInstallTests(unittest.TestCase):
-    def test_install_repo_skills_uses_safe_exposure_name_for_windows_unsafe_skill_name(self) -> None:
+    def test_install_repo_skills_rejects_client_incompatible_skill_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             roots = WorkspaceRoots.for_home(home)
@@ -529,15 +956,150 @@ class RepoInstallTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = roots.install_repo_skills(
-                repo_slug="nextlevelbuilder/ui-ux-pro-max-skill",
-                skill_paths=[".claude/skills/banner-design"],
+            with self.assertRaisesRegex(RuntimeError, "ckm:banner-design"):
+                roots.install_repo_skills(
+                    repo_slug="nextlevelbuilder/ui-ux-pro-max-skill",
+                    skill_paths=[".claude/skills/banner-design"],
+                )
+
+    def test_install_repo_skills_rejects_invalid_skill_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            roots = WorkspaceRoots.for_home(home)
+            repo_root = home / ".skills" / "repos" / "pbakaus" / "impeccable"
+            skill_dir = repo_root / ".codex" / "skills" / "harden"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: harden\n"
+                "description: Make interfaces production-ready: error handling\n"
+                "---\n",
+                encoding="utf-8",
             )
 
-            self.assertEqual(result.installed[0].name, "ckm:banner-design")
-            self.assertTrue((home / ".agents" / "skills" / "banner-design" / "SKILL.md").is_file())
-            self.assertTrue((home / ".claude" / "skills" / "banner-design" / "SKILL.md").is_file())
-            self.assertTrue((home / ".copilot" / "skills" / "banner-design" / "SKILL.md").is_file())
+            with self.assertRaisesRegex(RuntimeError, "Invalid skill frontmatter"):
+                roots.install_repo_skills(
+                    repo_slug="pbakaus/impeccable",
+                    skill_paths=[".codex/skills/harden"],
+                )
+
+    def test_install_plugin_bundle_rejects_invalid_exported_skill_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            roots = WorkspaceRoots.for_home(home)
+            source_root = home / "projects" / "ui-ux-pro-max-skill"
+            (source_root / ".claude-plugin").mkdir(parents=True)
+            (source_root / "skills" / "banner-design").mkdir(parents=True)
+            (source_root / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
+            (source_root / "skills" / "banner-design" / "SKILL.md").write_text(
+                "---\nname: ckm:banner-design\n---\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "ckm:banner-design"):
+                roots.install_plugin_bundle(
+                    publisher="nextlevelbuilder",
+                    name="ui-ux-pro-max-skill",
+                    source_root=source_root,
+                )
+
+    def test_install_plugin_bundle_rejects_invalid_exported_skill_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            roots = WorkspaceRoots.for_home(home)
+            source_root = home / "projects" / "impeccable"
+            (source_root / ".claude-plugin").mkdir(parents=True)
+            (source_root / "skills" / "harden").mkdir(parents=True)
+            (source_root / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
+            (source_root / "skills" / "harden" / "SKILL.md").write_text(
+                "---\n"
+                "name: harden\n"
+                "description: Make interfaces production-ready: error handling\n"
+                "---\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "invalid frontmatter"):
+                roots.install_plugin_bundle(
+                    publisher="pbakaus",
+                    name="impeccable",
+                    source_root=source_root,
+                )
+
+    def test_install_plugin_bundle_replaces_existing_client_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            roots = WorkspaceRoots.for_home(home)
+            legacy_skill = home / ".skills" / "repos" / "superpowers" / "skills" / "brainstorming"
+            source_root = home / "projects" / "superpowers"
+            managed_skill = source_root / "skills" / "brainstorming"
+            legacy_skill.mkdir(parents=True)
+            managed_skill.mkdir(parents=True)
+            (legacy_skill / "SKILL.md").write_text("---\nname: brainstorming\n---\nlegacy\n", encoding="utf-8")
+            (managed_skill / "SKILL.md").write_text("---\nname: brainstorming\n---\nmanaged\n", encoding="utf-8")
+            (source_root / ".codex-plugin").mkdir()
+            (source_root / ".codex-plugin" / "plugin.json").write_text('{"name":"superpowers"}', encoding="utf-8")
+            _create_directory_link(home / ".claude" / "skills" / "brainstorming", legacy_skill)
+
+            roots.install_plugin_bundle(
+                publisher="obra",
+                name="superpowers",
+                source_root=source_root,
+                clients=["claude"],
+                native=False,
+            )
+
+            self.assertIn("managed", (home / ".claude" / "skills" / "brainstorming" / "SKILL.md").read_text(encoding="utf-8"))
+
+    def test_native_plugin_install_skips_registered_marketplace_add(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            roots = WorkspaceRoots.for_home(home)
+            bundle_root = home / ".skills" / "plugins" / "obra" / "superpowers"
+            (bundle_root / ".codex-plugin").mkdir(parents=True)
+            (bundle_root / "skills" / "using-superpowers").mkdir(parents=True)
+            (bundle_root / ".codex-plugin" / "plugin.json").write_text(
+                '{"name":"superpowers","version":"6.0.3"}',
+                encoding="utf-8",
+            )
+            (bundle_root / "skills" / "using-superpowers" / "SKILL.md").write_text(
+                "---\nname: using-superpowers\n---\n",
+                encoding="utf-8",
+            )
+            bundle = roots._plugin_bundle_from_path(
+                bundle_root,
+                publisher="obra",
+                name="superpowers",
+                bundle_type="plugin-managed",
+            )
+
+            def fake_run_captured(args: list[str], cwd=None, timeout=120):
+                if args[2:4] == ["marketplace", "list"]:
+                    return True, "superpowers-marketplace C:\\marketplace"
+                return True, json.dumps(
+                    {
+                        "installed": [
+                            {
+                                "pluginId": "superpowers@superpowers-marketplace",
+                                "name": "superpowers",
+                            }
+                        ]
+                    }
+                )
+
+            with mock.patch("skill_install_plus_plus.manager.shutil.which", return_value="codex"), mock.patch(
+                "skill_install_plus_plus.manager._run_captured",
+                side_effect=fake_run_captured,
+            ), mock.patch("skill_install_plus_plus.manager._run_inherited", return_value=0) as run_inherited:
+                notes = roots._apply_native_plugin_installs(
+                    bundle,
+                    ["codex"],
+                    marketplace_source="obra/superpowers-marketplace",
+                    marketplace_name="superpowers-marketplace",
+                )
+
+            run_inherited.assert_called_once()
+            self.assertIn("marketplace add skipped", notes[0])
 
     def test_install_repo_skills_clones_when_repo_absent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

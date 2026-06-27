@@ -45,6 +45,7 @@
 - [Support Matrix](#support-matrix)
 - [Install](#install)
 - [Quick Start](#quick-start)
+- [Interactive Installer](#interactive-installer)
 - [Source-of-Truth Model](#source-of-truth-model)
 - [Why Audit-First Matters](#why-audit-first-matters)
 - [Development](#development)
@@ -77,6 +78,7 @@ It is intentionally conservative: audit first, mutate second.
 - Plugin bundles stored under `~/.skills/plugins/<publisher>/<name>`
 - Explicit skill exposures for Codex, Claude Code, and Copilot CLI
 - Non-destructive alignment when client discovery roots drift away from managed state
+- Plugin-exported skills from either `skills/*` or `plugin/skills/*`
 
 ## Highlights
 
@@ -85,6 +87,7 @@ It is intentionally conservative: audit first, mutate second.
 - Audit-first workflow for drift, broken links, legacy copies, and missing exposures
 - Safe alignment that creates missing links without rewriting unrelated client state
 - Public Python CLI available through `uvx`, `uv tool install`, and `pipx`
+- Interactive Node installer/status CLI for local bootstrap and client drift checks
 - GitHub Actions CI plus PyPI release automation via Trusted Publishing
 
 ## Support Matrix
@@ -141,17 +144,88 @@ skillpp install --repo jackwener/OpenCLI --path skills/opencli-browser
 skillpp install-plugin --publisher acme --name suite --repo acme/suite
 ```
 
+By default, `install-plugin` also uses native client plugin commands when the
+client CLI is available, so bundle-level hooks, MCP servers, and runtime
+metadata are installed by the client instead of only exposing `SKILL.md` files.
+Preview those native commands without running them:
+
+```powershell
+skillpp install-plugin --publisher acme --name suite --repo acme/suite --native-dry-run
+```
+
+Use `--no-native` only when you intentionally want source-of-truth normalization
+and exported skill links without client-native plugin installation.
+
 5. Create missing non-destructive exposures:
 
 ```powershell
 skillpp align --apply
 ```
 
-6. Refresh managed repositories and git-backed bundles:
+6. Remove a managed custom skill after reviewing the dry run:
+
+```powershell
+skillpp remove codex-mem
+skillpp remove codex-mem --apply
+```
+
+7. Refresh managed repositories and git-backed bundles:
 
 ```powershell
 skillpp update
 ```
+
+## Interactive Installer
+
+This repository also ships a local Node installer modeled after the
+`skill-installer` workflow. It is useful when you want a richer status table,
+interactive client selection, and dry-run output before changing anything.
+
+Install the Node dependencies once:
+
+```powershell
+npm install
+```
+
+Show client status without modifying anything:
+
+```powershell
+node install.mjs --status
+```
+
+Preview the commands that would run:
+
+```powershell
+node install.mjs --dry-run --yes
+```
+
+Run the interactive flow:
+
+```powershell
+node install.mjs
+```
+
+Supported flags:
+
+| Flag | Effect |
+| --- | --- |
+| `--status`, `-s` | Show client status and exit |
+| `--dry-run`, `-n` | Print install/update commands without running them |
+| `--yes`, `-y` | Skip confirmation and select all eligible clients |
+| `--client <name>` | Limit to `claude`, `codex`, or `copilot`; repeat for more |
+| `--help`, `-h` | Show CLI help |
+
+The installer runs in auto mode:
+
+- If plugin manifests are present, it uses each client's native plugin commands
+  (`plugin marketplace add`, `plugin install`/`update`, or Codex `plugin add`).
+- If plugin manifests are not present, it bootstraps this repository through the
+  Python `skillpp` CLI and verifies the client discovery roots afterward.
+
+Detection and status commands capture output. Install/update commands inherit
+the terminal so first-run trust prompts remain interactive. After a real
+install/update, the CLI verifies state again instead of trusting the command
+exit code alone.
 
 ## Source-of-Truth Model
 
@@ -194,6 +268,12 @@ Run the test suite:
 
 ```powershell
 uv run python -m unittest tests.test_manager tests.test_cli -v
+```
+
+Validate the Node installer surface:
+
+```powershell
+npm run check
 ```
 
 Build the package:

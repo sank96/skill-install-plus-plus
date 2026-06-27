@@ -3,6 +3,8 @@ from __future__ import annotations
 from io import StringIO
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -66,8 +68,41 @@ class PublicSurfaceTests(unittest.TestCase):
         self.assertIn("## What Skillpp Manages", readme)
         self.assertIn("## Highlights", readme)
         self.assertIn("## Support Matrix", readme)
+        self.assertIn("## Interactive Installer", readme)
         self.assertIn("## Why Audit-First Matters", readme)
         self.assertIn("skillpp bootstrap --source .", readme)
+
+
+class NodeInstallerSurfaceTests(unittest.TestCase):
+    @unittest.skipIf(shutil.which("node") is None, "node is not available")
+    def test_node_installer_help_and_guardrail(self) -> None:
+        help_result = subprocess.run(
+            ["node", "install.mjs", "--help"],
+            cwd=PROJECT_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+
+        self.assertEqual(help_result.returncode, 0, help_result.stdout)
+        self.assertIn("--status", help_result.stdout)
+        self.assertIn("--dry-run", help_result.stdout)
+        self.assertIn("--yes", help_result.stdout)
+
+        check_result = subprocess.run(
+            ["node", "scripts/check-installer.mjs"],
+            cwd=PROJECT_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+
+        self.assertEqual(check_result.returncode, 0, check_result.stdout)
+        self.assertIn("Installer check OK", check_result.stdout)
 
 
 class RegistryTests(unittest.TestCase):
@@ -133,6 +168,29 @@ class CliTests(unittest.TestCase):
             self.assertIn("Policy file:", output)
             self.assertTrue((home / ".skills" / "custom" / "skill-install-plus-plus" / "SKILL.md").is_file())
 
+    def test_remove_command_dry_run_then_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            custom = home / ".skills" / "custom" / "codex-mem"
+            custom.mkdir(parents=True)
+
+            stdout = StringIO()
+            with mock.patch("sys.stdout", stdout):
+                dry_code = main(["--home", str(home), "remove", "codex-mem"])
+
+            self.assertEqual(dry_code, 0)
+            self.assertTrue(custom.exists())
+            self.assertIn("Would remove:", stdout.getvalue())
+            self.assertIn("Dry run only", stdout.getvalue())
+
+            stdout = StringIO()
+            with mock.patch("sys.stdout", stdout):
+                apply_code = main(["--home", str(home), "remove", "codex-mem", "--apply"])
+
+            self.assertEqual(apply_code, 0)
+            self.assertFalse(custom.exists())
+            self.assertIn("Removed:", stdout.getvalue())
+
 
 class AlignCliTests(unittest.TestCase):
     def test_align_dry_run_prints_issues_and_no_actions(self) -> None:
@@ -194,6 +252,7 @@ class PluginCliTests(unittest.TestCase):
                         "understand-anything",
                         "--source",
                         str(source_root),
+                        "--no-native",
                     ]
                 )
 
@@ -205,6 +264,159 @@ class PluginCliTests(unittest.TestCase):
             self.assertTrue((home / ".agents" / "skills" / "understand" / "SKILL.md").is_file())
             self.assertTrue((home / ".claude" / "skills" / "understand" / "SKILL.md").is_file())
             self.assertTrue((home / ".copilot" / "skills" / "understand" / "SKILL.md").is_file())
+
+    def test_install_plugin_native_dry_run_prints_client_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            source_root = home / "projects" / "memory-plugin"
+            (source_root / ".claude-plugin").mkdir(parents=True)
+            (source_root / ".agents" / "plugins").mkdir(parents=True)
+            (source_root / "plugin" / ".codex-plugin").mkdir(parents=True)
+            (source_root / "plugin" / "skills" / "mem-search").mkdir(parents=True)
+            (source_root / ".claude-plugin" / "plugin.json").write_text(
+                '{"name":"memory-plugin","version":"1.0.0"}',
+                encoding="utf-8",
+            )
+            (source_root / ".claude-plugin" / "marketplace.json").write_text(
+                '{"name":"memory-market","plugins":[{"name":"memory-plugin","source":"./plugin"}]}',
+                encoding="utf-8",
+            )
+            (source_root / ".agents" / "plugins" / "marketplace.json").write_text(
+                '{"name":"memory-market","plugins":[{"name":"memory-plugin","source":{"source":"local","path":"./plugin"}}]}',
+                encoding="utf-8",
+            )
+            (source_root / "plugin" / ".codex-plugin" / "plugin.json").write_text(
+                '{"name":"memory-plugin","version":"1.0.0"}',
+                encoding="utf-8",
+            )
+            (source_root / "plugin" / "skills" / "mem-search" / "SKILL.md").write_text(
+                "---\nname: mem-search\n---\n",
+                encoding="utf-8",
+            )
+            existing_exposure = home / ".agents" / "skills" / "mem-search"
+            existing_exposure.mkdir(parents=True)
+            (existing_exposure / "legacy.txt").write_text("keep me", encoding="utf-8")
+
+            stdout = StringIO()
+            with mock.patch("sys.stdout", stdout), mock.patch(
+                "skill_install_plus_plus.manager.shutil.which",
+                return_value="cli",
+            ):
+                exit_code = main(
+                    [
+                        "--home",
+                        str(home),
+                        "install-plugin",
+                        "--publisher",
+                        "acme",
+                        "--name",
+                        "memory-plugin",
+                        "--source",
+                        str(source_root),
+                        "--client",
+                        "codex",
+                        "--native-dry-run",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            output = stdout.getvalue()
+            self.assertIn("Native [codex] dry-run:", output)
+            self.assertIn("codex plugin marketplace add", output)
+            self.assertIn("codex plugin add memory-plugin@memory-market", output)
+            self.assertIn("Dry run only:", output)
+            self.assertFalse((home / ".skills" / "plugins" / "acme" / "memory-plugin").exists())
+            self.assertFalse((home / ".skills" / "registry.json").exists())
+            self.assertTrue((existing_exposure / "legacy.txt").is_file())
+
+    def test_install_plugin_native_dry_run_accepts_marketplace_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            source_root = home / "projects" / "superpowers"
+            (source_root / ".codex-plugin").mkdir(parents=True)
+            (source_root / "skills" / "using-superpowers").mkdir(parents=True)
+            (source_root / ".codex-plugin" / "plugin.json").write_text(
+                '{"name":"superpowers","version":"6.0.3"}',
+                encoding="utf-8",
+            )
+            (source_root / "skills" / "using-superpowers" / "SKILL.md").write_text(
+                "---\nname: using-superpowers\n---\n",
+                encoding="utf-8",
+            )
+
+            stdout = StringIO()
+            with mock.patch("sys.stdout", stdout), mock.patch(
+                "skill_install_plus_plus.manager.shutil.which",
+                return_value="cli",
+            ):
+                exit_code = main(
+                    [
+                        "--home",
+                        str(home),
+                        "install-plugin",
+                        "--publisher",
+                        "obra",
+                        "--name",
+                        "superpowers",
+                        "--source",
+                        str(source_root),
+                        "--client",
+                        "codex",
+                        "--native-dry-run",
+                        "--native-marketplace-source",
+                        "obra/superpowers-marketplace",
+                        "--native-marketplace-name",
+                        "superpowers-marketplace",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            output = stdout.getvalue()
+            self.assertIn("codex plugin marketplace add obra/superpowers-marketplace", output)
+            self.assertIn("codex plugin add superpowers@superpowers-marketplace", output)
+
+    def test_install_plugin_native_dry_run_skips_unsupported_codex_and_uses_copilot_direct_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            source_root = home / "projects" / "understand-anything"
+            (source_root / ".claude-plugin").mkdir(parents=True)
+            (source_root / "skills" / "understand").mkdir(parents=True)
+            (source_root / ".claude-plugin" / "plugin.json").write_text(
+                '{"name":"understand-anything","version":"2.8.1"}',
+                encoding="utf-8",
+            )
+            (source_root / "skills" / "understand" / "SKILL.md").write_text(
+                "---\nname: understand\n---\n",
+                encoding="utf-8",
+            )
+
+            stdout = StringIO()
+            with mock.patch("sys.stdout", stdout), mock.patch(
+                "skill_install_plus_plus.manager.shutil.which",
+                return_value="cli",
+            ):
+                exit_code = main(
+                    [
+                        "--home",
+                        str(home),
+                        "install-plugin",
+                        "--publisher",
+                        "understand-anything",
+                        "--name",
+                        "understand-anything",
+                        "--source",
+                        str(source_root),
+                        "--native-dry-run",
+                        "--native-plugin-source",
+                        "Lum1104/Understand-Anything",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            output = stdout.getvalue()
+            self.assertIn("Native [codex]: skipped, no compatible native plugin manifest", output)
+            self.assertIn("claude plugin marketplace add", output)
+            self.assertIn("copilot plugin install Lum1104/Understand-Anything", output)
 
 
 if __name__ == "__main__":

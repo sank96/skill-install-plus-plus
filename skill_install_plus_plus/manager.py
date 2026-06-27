@@ -5,12 +5,27 @@ from dataclasses import asdict, dataclass, field
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 from typing import Iterable
+import yaml
 
 
 CLIENT_NAMES = ("codex", "claude", "copilot")
+CLIENT_SKILL_ROOT_PRIORITY = {
+    "codex": ((".codex", "skills"), (".agents", "skills")),
+    "claude": ((".claude", "skills"),),
+    "copilot": ((".copilot", "skills"), (".github", "skills")),
+}
+CLIENT_SKILL_ROOTS = {
+    tuple(root_parts): client
+    for client, roots in CLIENT_SKILL_ROOT_PRIORITY.items()
+    for root_parts in roots
+}
 POLICY_MARKER = "<!-- skill-management-policy -->"
+CLIENT_SAFE_SKILL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._ -]+$")
+CLIENT_SAFE_SKILL_NAME_RULE = "letters, numbers, hyphens, underscores, dots, and spaces"
 WINDOWS_INVALID_PATH_CHARS = set('<>:"/\\|?*')
 WINDOWS_RESERVED_PATH_NAMES = {
     "CON",
@@ -30,6 +45,7 @@ class SkillSource:
     relative_path: str
     owner: str | None = None
     repo: str | None = None
+    client_paths: dict[str, Path] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -141,6 +157,7 @@ class PluginInstallResult:
     created_exposures: list[Path]
     skipped_exposures: list[Path]
     notes: list[str] = field(default_factory=list)
+    native_notes: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -157,6 +174,15 @@ class BootstrapResult:
     created_paths: list[Path]
     skipped_paths: list[str]
     policy_files: list[Path]
+
+
+@dataclass(frozen=True)
+class RemoveResult:
+    skill_name: str
+    planned_paths: list[Path]
+    removed_paths: list[Path]
+    skipped: list[str] = field(default_factory=list)
+    applied: bool = False
 
 
 def _is_junction(path: Path) -> bool:
@@ -199,6 +225,39 @@ def _run_git(args: list[str], cwd: Path | None = None) -> str:
     return result.stdout.strip()
 
 
+def _run_captured(args: list[str], cwd: Path | None = None, timeout: int = 120) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            args,
+            cwd=str(cwd) if cwd else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    return result.returncode == 0, result.stdout.strip()
+
+
+def _run_inherited(args: list[str], cwd: Path | None = None) -> int:
+    try:
+        result = subprocess.run(args, cwd=str(cwd) if cwd else None, check=False)
+    except FileNotFoundError:
+        return 127
+    return result.returncode
+
+
+def _format_command(args: list[str]) -> str:
+    def quote(part: str) -> str:
+        if not part or any(char.isspace() for char in part) or any(char in part for char in ['"', "'"]):
+            return '"' + part.replace('"', '\\"') + '"'
+        return part
+
+    return " ".join(quote(str(part)) for part in args)
+
+
 def _read_skill_name(skill_dir: Path) -> str:
     skill_md = skill_dir / "SKILL.md"
     if not skill_md.is_file():
@@ -210,6 +269,60 @@ def _read_skill_name(skill_dir: Path) -> str:
             if value:
                 return value
     return skill_dir.name
+
+
+def _extract_frontmatter(skill_text: str) -> tuple[str | None, str | None]:
+    lines = skill_text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None, None
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return "\n".join(lines[1:index]), None
+    return None, "invalid frontmatter: missing closing delimiter."
+
+
+def _format_yaml_error(exc: yaml.YAMLError) -> str:
+    problem = getattr(exc, "problem", None)
+    mark = getattr(exc, "problem_mark", None)
+    if problem and mark:
+        return f"invalid YAML: {problem} at line {mark.line + 1} column {mark.column + 1}"
+    return f"invalid YAML: {' '.join(str(exc).split())}"
+
+
+def _skill_frontmatter_error(skill_dir: Path) -> str | None:
+    skill_md = skill_dir / "SKILL.md"
+    if not skill_md.is_file():
+        raise RuntimeError(f"SKILL.md not found at {skill_md}")
+
+    frontmatter, delimiter_error = _extract_frontmatter(skill_md.read_text(encoding="utf-8"))
+    if delimiter_error:
+        return delimiter_error
+    if frontmatter is None:
+        return None
+
+    try:
+        payload = yaml.safe_load(frontmatter) if frontmatter.strip() else {}
+    except yaml.YAMLError as exc:
+        return _format_yaml_error(exc)
+
+    if payload is not None and not isinstance(payload, dict):
+        return "invalid frontmatter: expected a YAML mapping."
+    return None
+
+
+def _is_client_safe_skill_name(skill_name: str) -> bool:
+    return bool(CLIENT_SAFE_SKILL_NAME_PATTERN.fullmatch(skill_name))
+
+
+def _suggest_client_safe_skill_name(skill_name: str, source_path: Path) -> str:
+    candidate = source_path.name.strip()
+    if _is_client_safe_skill_name(candidate):
+        return candidate
+
+    normalized = re.sub(r"[^A-Za-z0-9._ -]+", "-", skill_name)
+    normalized = re.sub(r"\s+", "-", normalized)
+    normalized = re.sub(r"-{2,}", "-", normalized).strip(" .-_")
+    return normalized or "skill"
 
 
 def _path_exists_or_links(path: Path) -> bool:
@@ -230,7 +343,14 @@ def _exposure_dir_name(skill_name: str, source_path: Path) -> str:
     return skill_name
 
 
-def _ensure_directory_link(link_path: Path, target_path: Path) -> tuple[bool, str]:
+def _remove_directory_link(path: Path) -> None:
+    if path.is_symlink() or (_path_exists_or_links(path) and not path.exists()):
+        path.unlink()
+        return
+    path.rmdir()
+
+
+def _ensure_directory_link(link_path: Path, target_path: Path, replace_existing_link: bool = False) -> tuple[bool, str]:
     if link_path == target_path:
         link_path.mkdir(parents=True, exist_ok=True)
         return False, f"Destination already uses {link_path}."
@@ -238,6 +358,10 @@ def _ensure_directory_link(link_path: Path, target_path: Path) -> tuple[bool, st
     if _path_exists_or_links(link_path):
         if _safe_resolve(link_path) == _safe_resolve(target_path):
             return False, f"Destination already present: {link_path}"
+        if replace_existing_link and _is_link(link_path):
+            _remove_directory_link(link_path)
+            _create_directory_link(link_path, target_path)
+            return True, f"Updated managed link: {link_path}"
         raise RuntimeError(f"Destination already exists and points elsewhere: {link_path}")
 
     _create_directory_link(link_path, target_path)
@@ -283,6 +407,35 @@ def _plugin_manifest_type(bundle_root: Path) -> str:
     return "none"
 
 
+def _read_json_if_exists(path: Path) -> dict | None:
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _repo_skill_manifest(repo_root: Path) -> dict:
+    payload = _read_json_if_exists(repo_root / "skill.json")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _repo_declared_clients(repo_root: Path) -> set[str]:
+    payload = _repo_skill_manifest(repo_root)
+    platforms = payload.get("platforms")
+    if not isinstance(platforms, list):
+        return set()
+    return {
+        str(platform).lower()
+        for platform in platforms
+        if str(platform).lower() in CLIENT_NAMES
+    }
+
+
+def _repo_primary_skill_name(repo_root: Path) -> str | None:
+    payload = _repo_skill_manifest(repo_root)
+    name = payload.get("name")
+    return str(name) if name else None
+
+
 def _plugin_like_structure(bundle_root: Path) -> bool:
     if _plugin_manifest_type(bundle_root) != "none":
         return True
@@ -292,13 +445,13 @@ def _plugin_like_structure(bundle_root: Path) -> bool:
 
 
 def _exported_skill_dirs(bundle_root: Path) -> dict[str, Path]:
-    skills_root = bundle_root / "skills"
     exported: dict[str, Path] = {}
-    if not skills_root.is_dir():
-        return exported
-    for skill_md in skills_root.glob("*/SKILL.md"):
-        skill_dir = skill_md.parent
-        exported[_read_skill_name(skill_dir)] = skill_dir
+    for skills_root in (bundle_root / "skills", bundle_root / "plugin" / "skills"):
+        if not skills_root.is_dir():
+            continue
+        for skill_md in skills_root.glob("*/SKILL.md"):
+            skill_dir = skill_md.parent
+            exported.setdefault(_read_skill_name(skill_dir), skill_dir)
     return dict(sorted(exported.items(), key=lambda item: item[0]))
 
 
@@ -358,6 +511,44 @@ def _is_relative_to(path: Path, other: Path) -> bool:
         return False
 
 
+def _plugin_provider_skill_client(relative_path: Path) -> str | None:
+    parts = relative_path.parts
+    if len(parts) < 5 or parts[0] != "plugins" or parts[-2] != "skills":
+        return None
+    provider = parts[1].lower()
+    return provider if provider in CLIENT_NAMES else None
+
+
+def _repo_skill_client(relative_path: Path) -> str | None:
+    parts = relative_path.parts
+    if len(parts) >= 3:
+        client = CLIENT_SKILL_ROOTS.get((parts[0], parts[1]))
+        if client:
+            return client
+    return _plugin_provider_skill_client(relative_path)
+
+
+def _is_provider_specific_skill_path(relative_path: Path) -> bool:
+    parts = relative_path.parts
+    if len(parts) >= 3 and parts[0].startswith(".") and parts[1] == "skills":
+        return True
+    if len(parts) >= 5 and parts[0] == "plugins" and parts[-2] == "skills":
+        return True
+    if len(parts) >= 4 and parts[0] == "packages" and parts[2] == "skills":
+        return True
+    return False
+
+
+def _client_path_priority(client: str, relative_path: Path) -> int:
+    root = tuple(relative_path.parts[:2])
+    priority = list(CLIENT_SKILL_ROOT_PRIORITY[client])
+    if root in priority:
+        return priority.index(root)
+    if _plugin_provider_skill_client(relative_path) == client:
+        return len(priority)
+    return len(priority) + 100
+
+
 @dataclass(frozen=True)
 class WorkspaceRoots:
     home: Path
@@ -369,6 +560,12 @@ class WorkspaceRoots:
     codex_root: Path
     claude_root: Path
     copilot_root: Path
+    _native_plugin_list_cache: dict[tuple[str, str, str], tuple[bool, str]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     @classmethod
     def for_home(cls, home: Path) -> "WorkspaceRoots":
@@ -406,7 +603,9 @@ class WorkspaceRoots:
     def bootstrap_self(self, source_root: Path, clients: Iterable[str] | None = None) -> BootstrapResult:
         self.ensure_root_directories()
         client_list = self._normalize_clients(clients)
+        self._ensure_skill_frontmatter_is_valid(source_root)
         skill_name = _read_skill_name(source_root)
+        self._ensure_skill_name_is_client_safe(skill_name, source_root, client_list)
         managed_source = self.custom_root / _exposure_dir_name(skill_name, source_root)
 
         created_paths: list[Path] = []
@@ -444,6 +643,112 @@ class WorkspaceRoots:
             skipped_paths=skipped_paths,
             policy_files=policy_files,
         )
+
+    def remove_custom_skill(
+        self,
+        skill_name: str,
+        clients: Iterable[str] | None = None,
+        apply: bool = False,
+        force: bool = False,
+    ) -> RemoveResult:
+        client_list = self._normalize_clients(clients)
+        source_path = self._custom_skill_path_for_name(skill_name)
+        planned_paths: list[Path] = []
+        removed_paths: list[Path] = []
+        skipped: list[str] = []
+
+        if source_path is None:
+            return RemoveResult(
+                skill_name=skill_name,
+                planned_paths=[],
+                removed_paths=[],
+                skipped=[f"Managed custom skill not found: {skill_name}"],
+                applied=apply,
+            )
+
+        source_target = _safe_resolve(source_path)
+        for client in client_list:
+            client_root = self.client_roots()[client]
+            if not client_root.is_dir():
+                continue
+            for entry in sorted(client_root.iterdir()):
+                if not self._entry_matches_removed_custom_skill(entry, skill_name, source_target):
+                    continue
+                if not _is_link(entry):
+                    skipped.append(f"Skipped standalone client copy in {client}: {entry}")
+                    continue
+                planned_paths.append(entry)
+                if apply:
+                    self._remove_path_entry(entry)
+                    removed_paths.append(entry)
+
+        planned_paths.append(source_path)
+        if apply:
+            removed_source = self._remove_custom_source_path(source_path, force=force)
+            if removed_source:
+                removed_paths.append(source_path)
+            else:
+                skipped.append(f"Skipped non-empty custom source without --force: {source_path}")
+
+        return RemoveResult(
+            skill_name=skill_name,
+            planned_paths=planned_paths,
+            removed_paths=removed_paths,
+            skipped=skipped,
+            applied=apply,
+        )
+
+    def _custom_skill_path_for_name(self, skill_name: str) -> Path | None:
+        direct = self.custom_root / skill_name
+        if _path_exists_or_links(direct):
+            return direct
+        for source in self._discover_custom_sources():
+            if source.name == skill_name:
+                return source.path
+        return None
+
+    def _entry_matches_removed_custom_skill(self, entry: Path, skill_name: str, source_target: Path) -> bool:
+        if entry.name == skill_name:
+            return True
+        if _safe_resolve(entry) == source_target:
+            return True
+        skill_md = entry / "SKILL.md"
+        if skill_md.is_file():
+            try:
+                return _read_skill_name(entry) == skill_name
+            except RuntimeError:
+                return False
+        return False
+
+    def _remove_custom_source_path(self, source_path: Path, force: bool = False) -> bool:
+        if _is_link(source_path):
+            self._remove_path_entry(source_path)
+            return True
+        if source_path.is_dir():
+            try:
+                source_path.rmdir()
+                return True
+            except OSError:
+                if not force:
+                    return False
+                shutil.rmtree(source_path)
+                return True
+        if source_path.is_file():
+            source_path.unlink()
+            return True
+        if _path_exists_or_links(source_path):
+            self._remove_path_entry(source_path)
+            return True
+        return False
+
+    def _remove_path_entry(self, path: Path) -> None:
+        if path.is_symlink() or (_path_exists_or_links(path) and not path.exists()):
+            path.unlink()
+            return
+        if path.is_dir():
+            path.rmdir()
+            return
+        path.unlink()
 
     def discover_sources(self) -> list[SkillSource]:
         discovered = self._discover_custom_sources() + self._discover_repo_sources()
@@ -498,16 +803,70 @@ class WorkspaceRoots:
     def _discover_repo_sources(self) -> list[SkillSource]:
         discovered: list[SkillSource] = []
         for owner, repo, repo_root in self._iter_repo_roots():
+            declared_clients = _repo_declared_clients(repo_root)
+            primary_skill_name = _repo_primary_skill_name(repo_root)
+            provider_sources: dict[str, dict[str, Path]] = {}
+            provider_relative_paths: dict[str, str] = {}
+            generic_sources: list[SkillSource] = []
             for skill_md in sorted(repo_root.rglob("SKILL.md")):
                 skill_dir = skill_md.parent
-                discovered.append(
+                relative_path = skill_dir.relative_to(repo_root)
+                client = _repo_skill_client(relative_path)
+                if client:
+                    skill_name = _read_skill_name(skill_dir)
+                    client_paths = provider_sources.setdefault(skill_name, {})
+                    current = client_paths.get(client)
+                    if current is None or _client_path_priority(client, relative_path) < _client_path_priority(
+                        client,
+                        current.relative_to(repo_root),
+                    ):
+                        client_paths[client] = skill_dir
+                    provider_relative_paths.setdefault(skill_name, relative_path.as_posix())
+                    continue
+                if _is_provider_specific_skill_path(relative_path):
+                    continue
+                generic_sources.append(
                     SkillSource(
                         name=_read_skill_name(skill_dir),
                         path=skill_dir,
                         source_type="repo",
-                        relative_path=skill_dir.relative_to(repo_root).as_posix(),
+                        relative_path=relative_path.as_posix(),
                         owner=owner,
                         repo=repo,
+                    )
+                )
+            generic_sources_by_name: dict[str, SkillSource] = {
+                source.name: source
+                for source in generic_sources
+            }
+            provider_skill_names = set(provider_sources)
+            discovered.extend(source for source in generic_sources if source.name not in provider_skill_names)
+            for skill_name, client_paths in provider_sources.items():
+                generic_source = generic_sources_by_name.get(skill_name)
+                provider_fallback = next(iter(client_paths.values())) if skill_name == primary_skill_name else None
+                ordered_client_paths = {}
+                for client in CLIENT_NAMES:
+                    if client in client_paths:
+                        ordered_client_paths[client] = client_paths[client]
+                    elif generic_source is not None:
+                        ordered_client_paths[client] = generic_source.path
+                    elif provider_fallback is not None and client in declared_clients:
+                        ordered_client_paths[client] = provider_fallback
+                ordered_client_paths = {
+                    client: path
+                    for client, path in ordered_client_paths.items()
+                    if path is not None
+                }
+                canonical_path = next(iter(ordered_client_paths.values()))
+                discovered.append(
+                    SkillSource(
+                        name=skill_name,
+                        path=canonical_path,
+                        source_type="repo",
+                        relative_path=canonical_path.relative_to(repo_root).as_posix(),
+                        owner=owner,
+                        repo=repo,
+                        client_paths=ordered_client_paths,
                     )
                 )
         return discovered
@@ -609,6 +968,85 @@ class WorkspaceRoots:
         }
         self.registry_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
+    def _invalid_skill_name_issue(self, skill_name: str, source_path: Path, client: str) -> AuditIssue:
+        suggested = _suggest_client_safe_skill_name(skill_name, source_path)
+        return AuditIssue(
+            skill_name=skill_name,
+            client=client,
+            code="invalid_skill_name",
+            message=(
+                f"Skill frontmatter name is not compatible with {client}. "
+                f"Allowed characters: {CLIENT_SAFE_SKILL_NAME_RULE}."
+            ),
+            path=source_path / "SKILL.md",
+            proposed_action=(
+                f"Rename `name:` to `{suggested}` or another client-safe identifier, "
+                "then re-run align --apply."
+            ),
+        )
+
+    def _invalid_skill_frontmatter_issue(
+        self,
+        skill_name: str,
+        source_path: Path,
+        client: str,
+        error: str,
+    ) -> AuditIssue:
+        return AuditIssue(
+            skill_name=skill_name,
+            client=client,
+            code="invalid_skill_frontmatter",
+            message=f"Skill frontmatter is invalid: {error}",
+            path=source_path / "SKILL.md",
+            proposed_action=(
+                "Fix the YAML frontmatter so it parses cleanly in every client, "
+                "then re-run align --apply."
+            ),
+        )
+
+    def _ensure_skill_frontmatter_is_valid(self, skill_dir: Path) -> None:
+        error = _skill_frontmatter_error(skill_dir)
+        if error is None:
+            return
+        raise RuntimeError(f"Invalid skill frontmatter in {skill_dir / 'SKILL.md'}: {error}")
+
+    def _ensure_skill_set_frontmatter_is_valid(self, skill_dirs: dict[str, Path]) -> None:
+        problems: list[str] = []
+        for skill_name, skill_dir in sorted(skill_dirs.items()):
+            error = _skill_frontmatter_error(skill_dir)
+            if error is None:
+                continue
+            problems.append(f"{skill_name} -> {skill_dir / 'SKILL.md'} ({error})")
+        if problems:
+            raise RuntimeError("Cannot export skills with invalid frontmatter:\n- " + "\n- ".join(problems))
+
+    def _ensure_skill_name_is_client_safe(self, skill_name: str, source_path: Path, clients: Iterable[str]) -> None:
+        invalid_clients = [client for client in self._normalize_clients(clients) if not _is_client_safe_skill_name(skill_name)]
+        if not invalid_clients:
+            return
+
+        suggested = _suggest_client_safe_skill_name(skill_name, source_path)
+        client_list = ", ".join(invalid_clients)
+        raise RuntimeError(
+            f"Skill '{skill_name}' cannot be installed for {client_list}. "
+            f"`name:` must contain only {CLIENT_SAFE_SKILL_NAME_RULE}. "
+            f"Update {source_path / 'SKILL.md'} and consider `{suggested}`."
+        )
+
+    def _ensure_skill_set_is_client_safe(self, skill_dirs: dict[str, Path], clients: Iterable[str]) -> None:
+        selected_clients = self._normalize_clients(clients)
+        problems: list[str] = []
+        for skill_name, skill_dir in sorted(skill_dirs.items()):
+            invalid_clients = [client for client in selected_clients if not _is_client_safe_skill_name(skill_name)]
+            if not invalid_clients:
+                continue
+            suggested = _suggest_client_safe_skill_name(skill_name, skill_dir)
+            problems.append(
+                f"{skill_name} [{', '.join(invalid_clients)}] -> rename `name:` in {skill_dir / 'SKILL.md'} to `{suggested}`"
+            )
+        if problems:
+            raise RuntimeError(f"Cannot export client-incompatible skill names:\n- " + "\n- ".join(problems))
+
     def audit(self) -> AuditReport:
         sources = self.discover_sources()
         managed_bundles = self.discover_plugin_bundles()
@@ -621,12 +1059,21 @@ class WorkspaceRoots:
         plugin_bundles = managed_bundles + manual_bundles
         client_skills = self._discover_client_skills()
         issues: list[AuditIssue] = []
+        source_names_by_repo = self._source_names_by_repo(sources)
 
         for source in sources:
             issues.extend(self._audit_source(source, client_skills))
 
         for bundle in managed_bundles:
-            issues.extend(self._audit_plugin_bundle(bundle, client_skills))
+            skip_skill_names = self._hybrid_bundle_source_skill_names(bundle, source_names_by_repo)
+            issues.extend(
+                self._audit_plugin_bundle(
+                    bundle,
+                    client_skills,
+                    skip_skill_names=skip_skill_names,
+                    native_clients=self._native_installed_clients(bundle),
+                )
+            )
 
         for bundle in manual_bundles:
             issues.append(
@@ -640,6 +1087,14 @@ class WorkspaceRoots:
                 )
             )
 
+        expected_targets = self._expected_managed_client_targets(sources, managed_bundles)
+        issue_paths = {
+            issue.path
+            for issue in issues
+            if issue.path is not None and issue.code in {"broken_link", "legacy_copy", "target_mismatch"}
+        }
+        issues.extend(self._audit_stale_managed_exposures(client_skills, expected_targets, ignored_paths=issue_paths))
+
         classification_counts = dict(Counter(bundle.bundle_type for bundle in plugin_bundles))
         return AuditReport(
             sources=sources,
@@ -649,12 +1104,96 @@ class WorkspaceRoots:
             classification_counts=classification_counts,
         )
 
+    def _source_names_by_repo(self, sources: list[SkillSource]) -> dict[tuple[str | None, str | None], set[str]]:
+        names_by_repo: dict[tuple[str | None, str | None], set[str]] = {}
+        for source in sources:
+            if source.source_type != "repo":
+                continue
+            names_by_repo.setdefault((source.owner, source.repo), set()).add(source.name)
+        return names_by_repo
+
+    def _hybrid_bundle_source_skill_names(
+        self,
+        bundle: PluginBundle,
+        source_names_by_repo: dict[tuple[str | None, str | None], set[str]],
+    ) -> set[str]:
+        if bundle.bundle_type != "hybrid":
+            return set()
+        return source_names_by_repo.get((bundle.owner, bundle.repo), set())
+
+    def _expected_managed_client_targets(
+        self,
+        sources: list[SkillSource],
+        managed_bundles: list[PluginBundle],
+    ) -> dict[str, set[Path]]:
+        expected = {client: set() for client in CLIENT_NAMES}
+        source_names_by_repo = self._source_names_by_repo(sources)
+        for source in sources:
+            client_paths = source.client_paths or {client: source.path for client in CLIENT_NAMES}
+            for client, source_path in client_paths.items():
+                expected[client].add(_safe_resolve(source_path))
+
+        for bundle in managed_bundles:
+            if bundle.bundle_type not in {"plugin-managed", "hybrid"}:
+                continue
+            skip_skill_names = self._hybrid_bundle_source_skill_names(bundle, source_names_by_repo)
+            for skill_name, skill_dir in bundle.exported_skill_dirs.items():
+                if skill_name in skip_skill_names:
+                    continue
+                target = _safe_resolve(skill_dir)
+                for client in CLIENT_NAMES:
+                    expected[client].add(target)
+        return expected
+
+    def _audit_stale_managed_exposures(
+        self,
+        client_skills: dict[str, list[ClientSkill]],
+        expected_targets: dict[str, set[Path]],
+        ignored_paths: set[Path] | None = None,
+    ) -> list[AuditIssue]:
+        issues: list[AuditIssue] = []
+        ignored = ignored_paths or set()
+        for client in CLIENT_NAMES:
+            for item in client_skills.get(client, []):
+                if item.top_entry in ignored or item.skill_dir in ignored:
+                    continue
+                if not item.direct or not item.top_entry_is_link:
+                    continue
+                target = item.resolved_skill_dir
+                if not _is_relative_to(target, self.skills_root):
+                    continue
+                if target in expected_targets[client]:
+                    continue
+                issues.append(
+                    AuditIssue(
+                        skill_name=item.skill_name,
+                        client=client,
+                        code="stale_managed_exposure",
+                        message="Client entry points into the managed tree, but no current managed source exports this skill.",
+                        path=item.top_entry,
+                        target=target,
+                        proposed_action="Review and remove the stale link after confirming the source no longer exports it.",
+                    )
+                )
+        return issues
+
     def _audit_source(self, source: SkillSource, client_skills: dict[str, list[ClientSkill]]) -> list[AuditIssue]:
         issues: list[AuditIssue] = []
-        source_target = _safe_resolve(source.path)
+        client_paths = source.client_paths or {client: source.path for client in CLIENT_NAMES}
 
         for client in CLIENT_NAMES:
-            matches = self._matching_client_entries(client_skills, client, source.name, source.path)
+            source_path = client_paths.get(client)
+            if source_path is None:
+                continue
+            source_target = _safe_resolve(source_path)
+            frontmatter_error = _skill_frontmatter_error(source_path)
+            if frontmatter_error:
+                issues.append(self._invalid_skill_frontmatter_issue(source.name, source_path, client, frontmatter_error))
+                continue
+            if not _is_client_safe_skill_name(source.name):
+                issues.append(self._invalid_skill_name_issue(source.name, source_path, client))
+                continue
+            matches = self._matching_client_entries(client_skills, client, source.name, source_path)
             exact = [item for item in matches if item.resolved_skill_dir == source_target]
             if exact:
                 continue
@@ -665,7 +1204,7 @@ class WorkspaceRoots:
                         source.name,
                         client,
                         matches,
-                        expected_target=source.path,
+                        expected_target=source_path,
                         missing_code="missing_exposure",
                     )
                 )
@@ -677,18 +1216,37 @@ class WorkspaceRoots:
                     client=client,
                     code="missing_exposure",
                     message=f"Managed skill is not exposed in {client}.",
-                    target=source.path,
-                    proposed_action=f"Create link at {self._client_exposure_path(client, source.name, source.path)}.",
+                    target=source_path,
+                    proposed_action=f"Create link at {self._client_exposure_path(client, source.name, source_path)}.",
                 )
             )
 
         return issues
 
-    def _audit_plugin_bundle(self, bundle: PluginBundle, client_skills: dict[str, list[ClientSkill]]) -> list[AuditIssue]:
+    def _audit_plugin_bundle(
+        self,
+        bundle: PluginBundle,
+        client_skills: dict[str, list[ClientSkill]],
+        skip_skill_names: set[str] | None = None,
+        native_clients: set[str] | None = None,
+    ) -> list[AuditIssue]:
         issues: list[AuditIssue] = []
+        skipped_names = skip_skill_names or set()
+        native_covered_clients = native_clients or set()
         for skill_name, skill_dir in bundle.exported_skill_dirs.items():
+            if skill_name in skipped_names:
+                continue
             target = _safe_resolve(skill_dir)
+            frontmatter_error = _skill_frontmatter_error(skill_dir)
             for client in CLIENT_NAMES:
+                if client in native_covered_clients:
+                    continue
+                if frontmatter_error:
+                    issues.append(self._invalid_skill_frontmatter_issue(skill_name, skill_dir, client, frontmatter_error))
+                    continue
+                if not _is_client_safe_skill_name(skill_name):
+                    issues.append(self._invalid_skill_name_issue(skill_name, skill_dir, client))
+                    continue
                 matches = self._matching_client_entries(client_skills, client, skill_name, skill_dir)
                 exact = [item for item in matches if item.resolved_skill_dir == target]
                 if exact:
@@ -715,6 +1273,25 @@ class WorkspaceRoots:
                     )
                 )
         return issues
+
+    def _native_installed_clients(self, bundle: PluginBundle) -> set[str]:
+        if bundle.bundle_type not in {"plugin-managed", "hybrid"}:
+            return set()
+        if not self._has_native_plugin_surface(bundle.path):
+            return set()
+
+        plugin_name = self._native_plugin_name(bundle.path) or bundle.name
+        installed: set[str] = set()
+        for client in CLIENT_NAMES:
+            cli = {"codex": "codex", "claude": "claude", "copilot": "copilot"}[client]
+            cli_path = shutil.which(cli)
+            if cli_path is None:
+                continue
+            for marketplace_name in self._native_marketplace_name_candidates(bundle, client, plugin_name):
+                if self._native_plugin_installed(client, plugin_name, marketplace_name, cli_path=cli_path):
+                    installed.add(client)
+                    break
+        return installed
 
     def _matching_client_entries(
         self,
@@ -870,6 +1447,7 @@ class WorkspaceRoots:
             if not (skill_dir / "SKILL.md").is_file():
                 raise RuntimeError(f"Skill path does not contain SKILL.md: {skill_path}")
 
+            self._ensure_skill_frontmatter_is_valid(skill_dir)
             source = SkillSource(
                 name=_read_skill_name(skill_dir),
                 path=skill_dir,
@@ -878,6 +1456,7 @@ class WorkspaceRoots:
                 owner=owner,
                 repo=repo,
             )
+            self._ensure_skill_name_is_client_safe(source.name, source.path, client_list)
             installed.append(source)
             for client in client_list:
                 created, path_or_message = self._apply_skill_source_exposure(source, client)
@@ -918,6 +1497,12 @@ class WorkspaceRoots:
         ref: str = "main",
         update_existing: bool = False,
         export_skills: Iterable[str] | None = None,
+        native: bool = False,
+        native_dry_run: bool = False,
+        native_marketplace_source: str | None = None,
+        native_marketplace_name: str | None = None,
+        native_plugin_name: str | None = None,
+        native_plugin_source: str | None = None,
     ) -> PluginInstallResult:
         self.ensure_root_directories()
         client_list = self._normalize_clients(clients)
@@ -929,6 +1514,77 @@ class WorkspaceRoots:
 
         owner: str | None = None
         repo: str | None = None
+        if native_dry_run:
+            if source_root:
+                bundle_path = source_root
+                notes.append(f"Dry run only: would link plugin bundle at {bundle_root}.")
+            else:
+                owner, repo = self._parse_repo_slug(repo_slug or "")
+                bundle_path = bundle_root
+                if bundle_root.exists():
+                    if update_existing and (bundle_root / ".git").is_dir():
+                        notes.append(f"Dry run only: would update existing plugin bundle at {bundle_root}.")
+                    else:
+                        notes.append(f"Plugin bundle already present: {bundle_root}")
+                else:
+                    notes.append(
+                        f"Dry run only: would clone https://github.com/{owner}/{repo}.git "
+                        f"at ref {ref} into {bundle_root}."
+                    )
+
+            if not bundle_path.exists():
+                bundle = PluginBundle(
+                    publisher=publisher,
+                    name=name,
+                    path=bundle_path,
+                    bundle_type="plugin-managed",
+                    manifest_type="none",
+                    owner=owner,
+                    repo=repo,
+                )
+                native_notes = [
+                    "Native plugin dry-run skipped: bundle is not present locally, "
+                    "so manifests cannot be inspected without cloning."
+                ]
+            else:
+                bundle = self._plugin_bundle_from_path(
+                    bundle_path,
+                    publisher=publisher,
+                    name=name,
+                    bundle_type="plugin-managed",
+                    owner=owner,
+                    repo=repo,
+                    export_skills=list(export_skills) if export_skills else None,
+                )
+                self._ensure_skill_set_frontmatter_is_valid(bundle.exported_skill_dirs)
+                self._ensure_skill_set_is_client_safe(bundle.exported_skill_dirs, client_list)
+                native_notes = (
+                    self._apply_native_plugin_installs(
+                        bundle,
+                        client_list,
+                        dry_run=True,
+                        marketplace_path=bundle_root,
+                        marketplace_source=native_marketplace_source,
+                        marketplace_name=native_marketplace_name,
+                        plugin_name=native_plugin_name,
+                        direct_plugin_source=native_plugin_source,
+                    )
+                    if native
+                    else []
+                )
+
+            if not bundle.exported_skills:
+                notes.append(f"No exported skills found under {bundle_path / 'skills'}.")
+
+            return PluginInstallResult(
+                bundle_root=bundle_root,
+                bundle=bundle,
+                created_exposures=[],
+                skipped_exposures=[],
+                notes=notes,
+                native_notes=native_notes,
+            )
+
         if source_root:
             created, message = _ensure_directory_link(bundle_root, source_root)
             if not created:
@@ -964,7 +1620,22 @@ class WorkspaceRoots:
             repo=repo,
             export_skills=list(export_skills) if export_skills else None,
         )
+        self._ensure_skill_set_frontmatter_is_valid(bundle.exported_skill_dirs)
+        self._ensure_skill_set_is_client_safe(bundle.exported_skill_dirs, client_list)
         created_exposures, skipped_exposures = self._apply_exported_skill_exposures(bundle, client_list)
+        native_notes = (
+            self._apply_native_plugin_installs(
+                bundle,
+                client_list,
+                dry_run=native_dry_run,
+                marketplace_source=native_marketplace_source,
+                marketplace_name=native_marketplace_name,
+                plugin_name=native_plugin_name,
+                direct_plugin_source=native_plugin_source,
+            )
+            if native
+            else []
+        )
 
         registry = self.load_registry()
         updated_plugins = [
@@ -993,7 +1664,259 @@ class WorkspaceRoots:
             created_exposures=created_exposures,
             skipped_exposures=skipped_exposures,
             notes=notes,
+            native_notes=native_notes,
         )
+
+    def _apply_native_plugin_installs(
+        self,
+        bundle: PluginBundle,
+        clients: Iterable[str],
+        dry_run: bool = False,
+        marketplace_path: Path | None = None,
+        marketplace_source: str | None = None,
+        marketplace_name: str | None = None,
+        plugin_name: str | None = None,
+        direct_plugin_source: str | None = None,
+    ) -> list[str]:
+        notes: list[str] = []
+        if not self._has_native_plugin_surface(bundle.path):
+            return [f"Native plugin install skipped: no client plugin manifests found in {bundle.path}."]
+
+        resolved_plugin_name = plugin_name or self._native_plugin_name(bundle.path) or bundle.name
+        marketplace_root = marketplace_path or bundle.path
+        marketplace_source_value = marketplace_source or str(marketplace_root)
+        for client in self._normalize_clients(clients):
+            if not self._has_native_plugin_surface_for_client(bundle.path, client):
+                notes.append(f"Native [{client}]: skipped, no compatible native plugin manifest found in {bundle.path}.")
+                continue
+
+            cli = {"codex": "codex", "claude": "claude", "copilot": "copilot"}[client]
+            cli_path = shutil.which(cli)
+            if cli_path is None:
+                notes.append(f"Native [{client}]: skipped, `{cli}` CLI not found in PATH.")
+                continue
+
+            resolved_marketplace_name = marketplace_name or self._native_marketplace_name(bundle.path, client) or bundle.publisher
+            selector = f"{resolved_plugin_name}@{resolved_marketplace_name}"
+            use_direct_install = client == "copilot" and bool(direct_plugin_source)
+            marketplace_add = [cli_path, "plugin", "marketplace", "add", marketplace_source_value]
+            action = (
+                "install"
+                if dry_run
+                else (
+                    "update"
+                    if self._native_plugin_installed(client, resolved_plugin_name, resolved_marketplace_name, cli_path=cli_path)
+                    else "install"
+                )
+            )
+            action_command = self._native_plugin_action_command(
+                client,
+                selector,
+                resolved_plugin_name,
+                action,
+                cli_path=cli_path,
+                direct_source=direct_plugin_source if use_direct_install else None,
+            )
+            commands = [action_command] if use_direct_install else [marketplace_add, action_command]
+            display_commands = [[cli, *command[1:]] for command in commands]
+
+            if dry_run:
+                notes.append(f"Native [{client}] dry-run: " + " && ".join(_format_command(command) for command in display_commands))
+                continue
+
+            marketplace_registered = self._native_marketplace_registered(client, resolved_marketplace_name, cli_path=cli_path)
+            add_status: str
+            if use_direct_install:
+                add_status = "not-used"
+            elif marketplace_registered:
+                add_status = "skipped"
+            else:
+                add_status = str(_run_inherited(marketplace_add))
+            action_code = _run_inherited(action_command)
+            installed_after = self._native_plugin_installed(client, resolved_plugin_name, resolved_marketplace_name, cli_path=cli_path)
+            if installed_after:
+                notes.append(
+                    f"Native [{client}]: {action} verified for {selector} "
+                    f"(marketplace add {add_status}, {action} exit {action_code})."
+                )
+            else:
+                notes.append(
+                    f"Native [{client}]: {action} not verified for {selector} "
+                    f"(marketplace add {add_status}, {action} exit {action_code})."
+                )
+        return notes
+
+    def _has_native_plugin_surface(self, bundle_root: Path) -> bool:
+        return any(
+            path.is_file()
+            for path in [
+                bundle_root / ".claude-plugin" / "plugin.json",
+                bundle_root / ".codex-plugin" / "plugin.json",
+                bundle_root / "plugin" / ".claude-plugin" / "plugin.json",
+                bundle_root / "plugin" / ".codex-plugin" / "plugin.json",
+            ]
+        )
+
+    def _has_native_plugin_surface_for_client(self, bundle_root: Path, client: str) -> bool:
+        claude_manifests = [
+            bundle_root / ".claude-plugin" / "plugin.json",
+            bundle_root / "plugin" / ".claude-plugin" / "plugin.json",
+        ]
+        if client == "claude":
+            return any(path.is_file() for path in claude_manifests)
+        if client == "codex":
+            return any(
+                path.is_file()
+                for path in [
+                    bundle_root / ".codex-plugin" / "plugin.json",
+                    bundle_root / "plugin" / ".codex-plugin" / "plugin.json",
+                ]
+            )
+        if client == "copilot":
+            return any(
+                path.is_file()
+                for path in [
+                    bundle_root / ".copilot-plugin" / "plugin.json",
+                    bundle_root / "plugin" / ".copilot-plugin" / "plugin.json",
+                    *claude_manifests,
+                ]
+            )
+        return False
+
+    def _native_plugin_name(self, bundle_root: Path) -> str | None:
+        for path in [
+            bundle_root / ".claude-plugin" / "plugin.json",
+            bundle_root / ".codex-plugin" / "plugin.json",
+            bundle_root / "plugin" / ".claude-plugin" / "plugin.json",
+            bundle_root / "plugin" / ".codex-plugin" / "plugin.json",
+        ]:
+            payload = _read_json_if_exists(path)
+            if payload and payload.get("name"):
+                return str(payload["name"])
+        return None
+
+    def _native_marketplace_name(self, bundle_root: Path, client: str) -> str | None:
+        candidates = []
+        if client == "codex":
+            candidates.append(bundle_root / ".agents" / "plugins" / "marketplace.json")
+            candidates.append(bundle_root / "agents" / "plugins" / "marketplace.json")
+        candidates.extend(
+            [
+                bundle_root / ".claude-plugin" / "marketplace.json",
+                bundle_root / "marketplace.json",
+            ]
+        )
+        for path in candidates:
+            payload = _read_json_if_exists(path)
+            if payload and payload.get("name"):
+                return str(payload["name"])
+        return None
+
+    def _native_marketplace_name_candidates(self, bundle: PluginBundle, client: str, plugin_name: str) -> list[str]:
+        candidates = [
+            self._native_marketplace_name(bundle.path, client),
+            bundle.publisher,
+            f"{plugin_name}-skills",
+            f"{bundle.name}-skills",
+        ]
+        unique: list[str] = []
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if candidate not in unique:
+                unique.append(candidate)
+        return unique
+
+    def _native_plugin_action_command(
+        self,
+        client: str,
+        selector: str,
+        plugin_name: str,
+        action: str,
+        cli_path: str | None = None,
+        direct_source: str | None = None,
+    ) -> list[str]:
+        if client == "codex":
+            return [cli_path or "codex", "plugin", "add", selector]
+        if client == "copilot":
+            if direct_source and action == "install":
+                return [cli_path or "copilot", "plugin", "install", direct_source]
+            if direct_source and action == "update":
+                return [cli_path or "copilot", "plugin", "update", plugin_name]
+            return [cli_path or "copilot", "plugin", "update" if action == "update" else "install", selector]
+        return [cli_path or "claude", "plugin", "update" if action == "update" else "install", selector]
+
+    def _native_plugin_installed(self, client: str, plugin_name: str, marketplace_name: str, cli_path: str | None = None) -> bool:
+        if client == "codex":
+            ok, output = self._native_plugin_list_output(client, cli_path=cli_path)
+            if not ok:
+                return False
+            try:
+                payload = json.loads(output or "{}")
+            except json.JSONDecodeError:
+                return False
+            return self._json_plugin_list_contains(payload, plugin_name, marketplace_name)
+
+        if client == "claude":
+            ok, output = self._native_plugin_list_output(client, cli_path=cli_path)
+            if not ok:
+                return False
+            try:
+                payload = json.loads(output or "[]")
+            except json.JSONDecodeError:
+                return plugin_name.lower() in output.lower()
+            return self._json_plugin_list_contains(payload, plugin_name, marketplace_name)
+
+        ok, output = self._native_plugin_list_output(client, cli_path=cli_path)
+        return ok and plugin_name.lower() in output.lower()
+
+    def _native_plugin_list_output(
+        self,
+        client: str,
+        cli_path: str | None = None,
+        marketplace_name: str | None = None,
+    ) -> tuple[bool, str]:
+        cache_key = (client, cli_path or "", marketplace_name or "")
+        if cache_key in self._native_plugin_list_cache:
+            return self._native_plugin_list_cache[cache_key]
+
+        if client == "codex":
+            command = [cli_path or "codex", "plugin", "list", "--json"]
+        elif client == "claude":
+            command = [cli_path or "claude", "plugin", "list", "--json"]
+        else:
+            command = [cli_path or "copilot", "plugin", "list"]
+
+        result = _run_captured(command, timeout=30)
+        self._native_plugin_list_cache[cache_key] = result
+        return result
+
+    def _native_marketplace_registered(self, client: str, marketplace_name: str, cli_path: str | None = None) -> bool:
+        cli = {"codex": "codex", "claude": "claude", "copilot": "copilot"}[client]
+        ok, output = _run_captured([cli_path or cli, "plugin", "marketplace", "list"], timeout=30)
+        return ok and marketplace_name.lower() in output.lower()
+
+    def _json_plugin_list_contains(self, payload: object, plugin_name: str, marketplace_name: str) -> bool:
+        if isinstance(payload, dict):
+            candidates: list[object] = []
+            for key in ["installed", "plugins", "items"]:
+                value = payload.get(key)
+                if isinstance(value, list):
+                    candidates.extend(value)
+            if not candidates and payload:
+                candidates.append(payload)
+        elif isinstance(payload, list):
+            candidates = list(payload)
+        else:
+            return False
+
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            values = {str(value).lower() for value in item.values() if isinstance(value, str)}
+            if plugin_name.lower() in values or f"{plugin_name}@{marketplace_name}".lower() in values:
+                return True
+        return False
 
     def _plugin_bundle_from_path(
         self,
@@ -1043,7 +1966,7 @@ class WorkspaceRoots:
         for client in client_list:
             for skill_name, skill_dir in bundle.exported_skill_dirs.items():
                 destination = self._client_exposure_path(client, skill_name, skill_dir)
-                created_link, _ = _ensure_directory_link(destination, skill_dir)
+                created_link, _ = _ensure_directory_link(destination, skill_dir, replace_existing_link=True)
                 if created_link:
                     created.append(destination)
                 else:
@@ -1099,7 +2022,7 @@ class WorkspaceRoots:
         actions: list[str] = []
         for issue in sorted(report.issues, key=lambda item: (item.skill_name, item.client, item.code)):
             if issue.code == "missing_exposure":
-                target = source_map.get(issue.skill_name)
+                target = issue.target or source_map.get(issue.skill_name)
                 if not target or not issue.client:
                     continue
                 path = self._client_exposure_path(issue.client, issue.skill_name, target)
@@ -1136,6 +2059,24 @@ class WorkspaceRoots:
                 if not created and message:
                     action = f"{action} ({message})"
                 actions.append(action)
+            elif issue.code == "target_mismatch":
+                if not issue.path or not issue.target or not issue.client:
+                    continue
+                if not _is_link(issue.path):
+                    actions.append(
+                        f"Manual action required - target mismatch for {issue.skill_name} in {issue.client}: "
+                        f"{issue.path} is not a managed link; inspect before replacing it with {issue.target}."
+                    )
+                    continue
+                try:
+                    created, message = _ensure_directory_link(issue.path, issue.target, replace_existing_link=True)
+                except RuntimeError as exc:
+                    actions.append(f"Failed to update link for {issue.skill_name} in {issue.client}: {exc}")
+                    continue
+                action = f"{'Updated' if created else 'Skipped'} skill link target for {issue.skill_name} in {issue.client}: {issue.path}"
+                if message:
+                    action = f"{action} ({message})"
+                actions.append(action)
             elif issue.code == "legacy_copy":
                 if not issue.path or not issue.target or not issue.client:
                     continue
@@ -1143,6 +2084,29 @@ class WorkspaceRoots:
                     f"Manual action required - standalone copy found for {issue.skill_name} in {issue.client}: "
                     f"inspect, backup, and compare {issue.path} against the managed target {issue.target}, "
                     f"then remove or migrate the standalone copy and re-run align to create the managed link."
+                )
+            elif issue.code == "invalid_skill_name":
+                if not issue.path or not issue.client:
+                    continue
+                actions.append(
+                    f"Manual action required - incompatible skill name for {issue.skill_name} in {issue.client}: "
+                    f"update {issue.path} so `name:` uses only {CLIENT_SAFE_SKILL_NAME_RULE}, "
+                    "then re-run align --apply."
+                )
+            elif issue.code == "invalid_skill_frontmatter":
+                if not issue.path or not issue.client:
+                    continue
+                actions.append(
+                    f"Manual action required - invalid frontmatter for {issue.skill_name} in {issue.client}: "
+                    f"fix {issue.path}, then re-run align --apply."
+                )
+            elif issue.code == "stale_managed_exposure":
+                if not issue.path or not issue.target or not issue.client:
+                    continue
+                actions.append(
+                    f"Manual action required - stale managed link for {issue.skill_name} in {issue.client}: "
+                    f"{issue.path} points at {issue.target}, but no current managed source exports it. "
+                    "Remove the link after confirming it is obsolete."
                 )
 
         return self.audit(), actions

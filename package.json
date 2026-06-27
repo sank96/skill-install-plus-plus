@@ -1,0 +1,19 @@
+{
+  "name": "skill-install-plus-plus-installer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Interactive installer/status CLI for skill-install-plus-plus across Codex, Claude Code, and GitHub Copilot CLI.",
+  "bin": {
+    "skillpp-install": "./install.mjs"
+  },
+  "scripts": {
+    "start": "node install.mjs",
+    "check": "node scripts/check-installer.mjs",
+    "test": "node scripts/check-installer.mjs"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.6.0",
+    "picocolors": "^1.1.1"
+  }
+}

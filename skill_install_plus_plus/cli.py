@@ -46,6 +46,18 @@ def _parser() -> argparse.ArgumentParser:
     install_plugin_parser.add_argument("--ref", default="main")
     install_plugin_parser.add_argument("--update-existing", action="store_true")
     install_plugin_parser.add_argument("--export-skill", action="append", help="Restrict exported skills to a subset.")
+    install_plugin_parser.add_argument("--no-native", action="store_true", help="Skip native client plugin install/update and only expose exported skills.")
+    install_plugin_parser.add_argument("--native-dry-run", action="store_true", help="Print native client plugin commands without running them.")
+    install_plugin_parser.add_argument("--native-marketplace-source", help="Override the source passed to native `plugin marketplace add`.")
+    install_plugin_parser.add_argument("--native-marketplace-name", help="Override the marketplace name used in native plugin selectors.")
+    install_plugin_parser.add_argument("--native-plugin-name", help="Override the plugin name used in native plugin selectors.")
+    install_plugin_parser.add_argument("--native-plugin-source", help="Override direct native plugin source for clients that support repository installs.")
+
+    remove_parser = subparsers.add_parser("remove", help="Remove a managed custom skill.")
+    remove_parser.add_argument("name", help="Skill name or custom directory name.")
+    remove_parser.add_argument("--client", action="append", choices=["codex", "claude", "copilot"], help="Client targets. Defaults to all.")
+    remove_parser.add_argument("--apply", action="store_true", help="Apply removals. Without this flag, only prints a plan.")
+    remove_parser.add_argument("--force", action="store_true", help="Also remove non-empty standalone custom source directories.")
 
     update_parser = subparsers.add_parser("update", help="Run git pull on managed repos.")
     update_parser.add_argument("--repo", help="owner/repo")
@@ -102,6 +114,12 @@ def main(argv: list[str] | None = None) -> int:
             ref=args.ref,
             update_existing=args.update_existing,
             export_skills=args.export_skill,
+            native=not args.no_native,
+            native_dry_run=args.native_dry_run,
+            native_marketplace_source=args.native_marketplace_source,
+            native_marketplace_name=args.native_marketplace_name,
+            native_plugin_name=args.native_plugin_name,
+            native_plugin_source=args.native_plugin_source,
         )
         print(f"Installed plugin bundle: {result.bundle_root}")
         print(f"Manifest type: {result.bundle.manifest_type}")
@@ -115,6 +133,24 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Exposure already satisfied: {path}")
         for note in result.notes:
             print(f"Note: {note}")
+        for note in result.native_notes:
+            print(f"Native: {note}")
+        return 0
+
+    if args.command == "remove":
+        result = roots.remove_custom_skill(
+            skill_name=args.name,
+            clients=args.client,
+            apply=args.apply,
+            force=args.force,
+        )
+        prefix = "Removed" if result.applied else "Would remove"
+        for path in result.removed_paths if result.applied else result.planned_paths:
+            print(f"{prefix}: {path}")
+        for item in result.skipped:
+            print(f"Skipped: {item}")
+        if not result.applied:
+            print("Dry run only. Re-run with --apply to remove these paths.")
         return 0
 
     if args.command == "update":

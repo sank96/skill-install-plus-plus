@@ -28,7 +28,9 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
   "Topic :: Utilities",
 ]
-dependencies = []
+dependencies = [
+  "PyYAML>=6.0.2,<7",
+]
 
 [project.urls]
 Homepage = "https://github.com/sank96/skill-install-plus-plus"
